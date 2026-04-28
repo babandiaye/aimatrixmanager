@@ -41,3 +41,9 @@ yarn-error.log*
 next-env.d.ts
 prisma.config.ts
 prisma/migrations/
+
+# python bot
+bot/__pycache__/
+bot/.venv/
+bot/*.pyc
+bot/.env

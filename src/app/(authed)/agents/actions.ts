@@ -23,31 +23,48 @@ const log = logger.child({ mod: "agents.actions" });
 
 const slugRe = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
-const baseSchema = z.object({
-  slug: z
-    .string()
-    .min(2, "2 caractères minimum")
-    .max(32, "32 caractères maximum")
-    .regex(
-      slugRe,
-      "Lettres minuscules, chiffres, tirets ; ne commence/finit pas par un tiret",
-    ),
-  name: z.string().min(2, "2 caractères minimum").max(100),
-  description: z
-    .string()
-    .max(2048)
-    .optional()
-    .transform((v) => v?.trim() || null),
-  systemPrompt: z.string().min(10, "Au moins 10 caractères").max(40000),
-  model: z.enum(["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]),
-  maxTokens: z.coerce.number().int().min(64).max(8192),
-  temperature: z.coerce
-    .number()
-    .min(0)
-    .max(1)
-    .optional()
-    .or(z.literal("").transform(() => undefined)),
-});
+const ANTHROPIC_MODELS = [
+  "claude-opus-4-7",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5",
+] as const;
+
+const baseSchema = z
+  .object({
+    slug: z
+      .string()
+      .min(2, "2 caractères minimum")
+      .max(32, "32 caractères maximum")
+      .regex(
+        slugRe,
+        "Lettres minuscules, chiffres, tirets ; ne commence/finit pas par un tiret",
+      ),
+    name: z.string().min(2, "2 caractères minimum").max(100),
+    description: z
+      .string()
+      .max(2048)
+      .optional()
+      .transform((v) => v?.trim() || null),
+    systemPrompt: z.string().min(10, "Au moins 10 caractères").max(40000),
+    provider: z.enum(["ANTHROPIC", "OLLAMA"]),
+    model: z.string().min(1, "Modèle requis").max(100),
+    maxTokens: z.coerce.number().int().min(64).max(8192),
+    temperature: z.coerce
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .or(z.literal("").transform(() => undefined)),
+  })
+  .refine(
+    (data) =>
+      data.provider !== "ANTHROPIC" ||
+      (ANTHROPIC_MODELS as readonly string[]).includes(data.model),
+    {
+      path: ["model"],
+      message: "Modèle Anthropic invalide",
+    },
+  );
 
 export type AgentFormState =
   | { error?: string; fieldErrors?: Record<string, string[]> }
@@ -60,7 +77,8 @@ function getFormData(formData: FormData) {
     name: String(formData.get("name") ?? "").trim(),
     description: String(formData.get("description") ?? ""),
     systemPrompt: String(formData.get("systemPrompt") ?? "").trim(),
-    model: String(formData.get("model") ?? ""),
+    provider: String(formData.get("provider") ?? "ANTHROPIC"),
+    model: String(formData.get("model") ?? "").trim(),
     maxTokens: String(formData.get("maxTokens") ?? "2048"),
     temperature: t === "" ? undefined : t,
   };
@@ -135,6 +153,7 @@ export async function createAgent(
       matrixAccessToken: encrypt(accessToken),
       matrixDeviceId: deviceId,
       systemPrompt: parsed.data.systemPrompt,
+      provider: parsed.data.provider,
       model: parsed.data.model,
       maxTokens: parsed.data.maxTokens,
       temperature: parsed.data.temperature ?? null,
@@ -178,6 +197,7 @@ export async function updateAgent(
       name: parsed.data.name,
       description: parsed.data.description,
       systemPrompt: parsed.data.systemPrompt,
+      provider: parsed.data.provider,
       model: parsed.data.model,
       maxTokens: parsed.data.maxTokens,
       temperature: parsed.data.temperature ?? null,

@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { can } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
+import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
 import {
   Card,
   CardContent,
@@ -25,6 +26,8 @@ export default async function EditAgentPage({
   if (!agent) notFound();
 
   const serverName = process.env.MATRIX_SERVER_NAME ?? "matrix.example.com";
+  const ollamaEnabled = isOllamaConfigured();
+  const ollamaModels = ollamaEnabled ? await listOllamaModels() : [];
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -48,12 +51,15 @@ export default async function EditAgentPage({
         <CardContent>
           <AgentForm
             serverName={serverName}
+            ollamaModels={ollamaModels}
+            ollamaEnabled={ollamaEnabled}
             initial={{
               id: agent.id,
               slug: agent.slug,
               name: agent.name,
               description: agent.description,
               systemPrompt: agent.systemPrompt,
+              provider: agent.provider,
               model: agent.model,
               maxTokens: agent.maxTokens,
               temperature: agent.temperature,

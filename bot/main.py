@@ -1,0 +1,443 @@
+"""
+Bot multi-agents Matrix — runtime aibotmanager.
+
+Lit la table `Agent` (status=ENABLED) et lance N clients matrix-nio en parallèle.
+Chaque agent ne répond que :
+  - dans ses rooms assignées (RoomAgent enabled=true)
+  - quand il est mentionné (@<slug> ou son MXID/displayname)
+
+Logs des conversations dans `AuditLog`.
+"""
+import asyncio
+import json
+import logging
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+import httpx
+from dotenv import load_dotenv
+from nio import (
+    AsyncClient,
+    AsyncClientConfig,
+    InviteMemberEvent,
+    KeysQueryResponse,
+    KeysUploadResponse,
+    MatrixRoom,
+    MegolmEvent,
+    RoomMessageText,
+)
+
+import db
+import llm
+from crypto_utils import decrypt
+
+load_dotenv()
+
+# ── Configuration globale ─────────────────────────────────────────────────────
+MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://127.0.0.1:8008")
+STORE_ROOT = os.getenv("STORE_PATH", "/app/store")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("aibotmanager")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AgentRunner — un par agent
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AgentRunner:
+    def __init__(self, row: db.AgentRow):
+        self.row = row
+        self.localpart = row.matrix_user_id.split(":", 1)[0].lstrip("@")
+        self.store_path = os.path.join(STORE_ROOT, self.row.slug)
+        Path(self.store_path).mkdir(parents=True, exist_ok=True)
+        self.client: Optional[AsyncClient] = None
+        # Historique court par room (clé = matrix_room_id)
+        self.history: dict[str, list] = {}
+        self.log = log.getChild(self.row.slug)
+
+    async def whoami(self, access_token: str) -> Optional[str]:
+        """Récupère le device_id si on ne l'a pas en DB (premier démarrage d'un agent récent)."""
+        async with httpx.AsyncClient(timeout=10) as http:
+            r = await http.get(
+                f"{MATRIX_HOMESERVER}/_matrix/client/v3/account/whoami",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if r.status_code != 200:
+                self.log.error(f"whoami: {r.status_code} {r.text}")
+                return None
+            return r.json().get("device_id")
+
+    async def setup(self) -> bool:
+        access_token = decrypt(self.row.matrix_access_token_enc)
+        device_id = self.row.matrix_device_id
+        if not device_id:
+            self.log.info("Pas de device_id en DB — récupération via whoami")
+            device_id = await self.whoami(access_token)
+            if not device_id:
+                self.log.error("Impossible d'obtenir le device_id")
+                return False
+            await db.save_device_id(self.row.id, device_id)
+            self.log.info(f"device_id persisté : {device_id}")
+
+        nio_config = AsyncClientConfig(
+            store_sync_tokens=True,
+            encryption_enabled=True,
+        )
+        self.client = AsyncClient(
+            homeserver=MATRIX_HOMESERVER,
+            user=self.row.matrix_user_id,
+            device_id=device_id,
+            store_path=self.store_path,
+            config=nio_config,
+        )
+        self.client.restore_login(
+            user_id=self.row.matrix_user_id,
+            device_id=device_id,
+            access_token=access_token,
+        )
+        self.log.info(f"✅ Session restaurée — {self.row.matrix_user_id} (device={device_id})")
+        return True
+
+    # ── Détection mention ──────────────────────────────────────────────────────
+    def is_mentioned(self, event, body: str) -> bool:
+        # 1. m.mentions.user_ids (MSC3952)
+        try:
+            mentions = (event.source or {}).get("content", {}).get("m.mentions", {})
+            if self.row.matrix_user_id in (mentions.get("user_ids") or []):
+                return True
+        except Exception:
+            pass
+        # 2. body contient le slug ou le MXID
+        low = body.lower()
+        if f"@{self.localpart}".lower() in low:
+            return True
+        if self.row.matrix_user_id.lower() in low:
+            return True
+        # 3. body contient le display name
+        if self.row.name.lower() in low:
+            return True
+        # 4. formatted_body avec pill
+        try:
+            formatted = (event.source or {}).get("content", {}).get("formatted_body") or ""
+            if self.row.matrix_user_id in formatted:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def strip_mention(self, body: str) -> str:
+        cleaned = body
+        for pattern in (
+            self.row.matrix_user_id,
+            f"@{self.localpart}",
+            self.row.name,
+        ):
+            if not pattern:
+                continue
+            cleaned = re.sub(
+                r"\s*" + re.escape(pattern) + r"\s*[:,]?\s*",
+                " ",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+        return cleaned.strip()
+
+    def is_dm(self, room: MatrixRoom) -> bool:
+        return len(room.users) <= 2
+
+    # ── LLM (Anthropic ou Ollama selon agent.provider) ───────────────────────
+    async def ask_llm(
+        self, room_id: str, question: str, sender: str
+    ) -> tuple[str, dict]:
+        history = self.history.setdefault(room_id, [])
+        history.append({"role": "user", "content": question})
+        try:
+            answer, usage = await llm.call(self.row, history, MAX_HISTORY)
+            history.append({"role": "assistant", "content": answer})
+            # Purge mémoire
+            if len(history) > MAX_HISTORY * 2:
+                del history[: len(history) - MAX_HISTORY * 2]
+            return answer, usage
+        except Exception as e:
+            self.log.error(f"Erreur LLM ({self.row.provider}) : {e}")
+            raise
+
+    # ── Envoi ─────────────────────────────────────────────────────────────────
+    async def send(self, room_id: str, text: str):
+        try:
+            room = self.client.rooms.get(room_id)
+            if room and room.encrypted:
+                try:
+                    await self.client.share_group_session(
+                        room_id=room_id, ignore_unverified_devices=True
+                    )
+                except Exception as e:
+                    self.log.warning(f"share_group_session: {e}")
+            await self.client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content={"msgtype": "m.text", "body": text},
+                ignore_unverified_devices=True,
+            )
+        except Exception as e:
+            self.log.error(f"Erreur envoi {room_id}: {e}")
+
+    # ── Pipeline message ──────────────────────────────────────────────────────
+    async def handle_text(self, room: MatrixRoom, event: RoomMessageText):
+        if event.sender == self.row.matrix_user_id:
+            return
+        body = (event.body or "").strip()
+        if not body:
+            return
+
+        # 1. La room est-elle assignée à cet agent et active ?
+        ra = await db.get_room_assignment(self.row.id, room.room_id)
+        if not ra:
+            return  # pas pour cet agent
+        if not ra["enabled"]:
+            return
+
+        # 2. DM = toujours répondre, groupe = mention requise
+        in_dm = self.is_dm(room)
+        if not in_dm and not self.is_mentioned(event, body):
+            return
+        if not in_dm:
+            body = self.strip_mention(body)
+            if not body:
+                return
+
+        self.log.info(
+            f"{event.sender} → {room.room_id[:25]} : {body[:80]}"
+        )
+
+        t0 = time.monotonic()
+        answer = None
+        usage = {}
+        err = None
+        try:
+            answer, usage = await self.ask_llm(room.room_id, body, event.sender)
+        except Exception as e:
+            err = str(e)
+            answer = "❌ Désolé, je rencontre un problème technique."
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
+        if answer:
+            await self.send(room.room_id, answer)
+
+        # Audit
+        try:
+            await db.insert_audit_log(
+                room_pk=ra["room_id"],
+                agent_id=self.row.id,
+                matrix_event_id=event.event_id,
+                sender_mxid=event.sender,
+                user_message=body,
+                agent_response=answer,
+                latency_ms=latency_ms,
+                error=err,
+                **usage,
+            )
+        except Exception as e:
+            self.log.warning(f"Audit log fail : {e}")
+
+    async def on_text(self, room: MatrixRoom, event: RoomMessageText):
+        await self.handle_text(room, event)
+
+    async def on_megolm(self, room: MatrixRoom, event: MegolmEvent):
+        if event.sender == self.row.matrix_user_id:
+            return
+        try:
+            decrypted = await self.client.decrypt_event(event)
+        except Exception as e:
+            self.log.warning(f"Déchiffrement E2EE : {e}")
+            return
+        if isinstance(decrypted, RoomMessageText):
+            await self.handle_text(room, decrypted)
+
+    async def on_invite(self, room: MatrixRoom, event: InviteMemberEvent):
+        if event.state_key != self.row.matrix_user_id:
+            return
+        self.log.info(f"Invitation reçue → {room.room_id}")
+        await self.client.join(room.room_id)
+
+    async def keys_loop(self):
+        await asyncio.sleep(15)
+        while True:
+            try:
+                if self.client.should_upload_keys:
+                    await self.client.keys_upload()
+                if self.client.should_query_keys:
+                    await self.client.keys_query()
+            except Exception as e:
+                self.log.warning(f"keys_loop : {e}")
+            await asyncio.sleep(300)
+
+    async def heartbeat_loop(self):
+        """Met à jour Agent.lastHeartbeatAt toutes les 30s pour le dashboard."""
+        # Premier ping immédiat
+        try:
+            await db.update_heartbeat(self.row.id)
+        except Exception as e:
+            self.log.warning(f"heartbeat init : {e}")
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await db.update_heartbeat(self.row.id)
+            except Exception as e:
+                self.log.warning(f"heartbeat : {e}")
+
+    async def run(self):
+        if not await self.setup():
+            return
+        try:
+            await self.client.set_displayname(self.row.name)
+        except Exception:
+            pass
+
+        self.log.info("Sync initiale...")
+        await self.client.sync(timeout=10000, full_state=True)
+        if self.client.should_upload_keys:
+            await self.client.keys_upload()
+        if self.client.should_query_keys:
+            await self.client.keys_query()
+
+        self.client.add_event_callback(self.on_text, RoomMessageText)
+        self.client.add_event_callback(self.on_megolm, MegolmEvent)
+        self.client.add_event_callback(self.on_invite, InviteMemberEvent)
+
+        asyncio.create_task(self.keys_loop())
+        asyncio.create_task(self.heartbeat_loop())
+        self.log.info(f"🚀 {self.row.slug} prêt")
+        try:
+            await self.client.sync_forever(timeout=30000, full_state=True)
+        finally:
+            await self.client.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Reconcile — sync DB ↔ runners en cours (toutes les 60s)
+# ══════════════════════════════════════════════════════════════════════════════
+
+RECONCILE_INTERVAL = int(os.getenv("RECONCILE_INTERVAL", "60"))
+
+
+async def _stop_runner(runner: "AgentRunner", task: asyncio.Task) -> None:
+    if not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
+    if runner.client:
+        try:
+            await runner.client.close()
+        except Exception:
+            pass
+
+
+async def reconcile_runners(
+    runners: dict[str, tuple["AgentRunner", asyncio.Task]],
+) -> None:
+    """Aligne les runners en cours avec la liste DB des agents ENABLED."""
+    enabled = await db.list_enabled_agents()
+    enabled_ids = {a.id for a in enabled}
+
+    # 1. Nettoyage des tasks qui ont planté
+    for aid in list(runners.keys()):
+        runner, task = runners[aid]
+        if task.done():
+            log.warning(
+                f"Runner {runner.row.slug} a terminé inopinément, retiré du pool"
+            )
+            del runners[aid]
+
+    # 2. Stopper les runners dont l'agent n'est plus ENABLED
+    for aid in list(runners.keys()):
+        if aid not in enabled_ids:
+            runner, task = runners[aid]
+            log.info(f"⏹️  Arrêt runner {runner.row.slug} (plus ENABLED)")
+            await _stop_runner(runner, task)
+            del runners[aid]
+
+    # 3. Démarrer les runners pour les nouveaux agents
+    for agent in enabled:
+        if agent.id not in runners:
+            log.info(f"▶️  Démarrage runner pour {agent.slug}")
+            runner = AgentRunner(agent)
+            task = asyncio.create_task(runner.run(), name=agent.slug)
+            runners[agent.id] = (runner, task)
+
+
+async def reconcile_loop(
+    runners: dict[str, tuple["AgentRunner", asyncio.Task]],
+) -> None:
+    """Boucle de fond : reconcile toutes les RECONCILE_INTERVAL secondes."""
+    while True:
+        await asyncio.sleep(RECONCILE_INTERVAL)
+        try:
+            await reconcile_runners(runners)
+        except Exception as e:
+            log.warning(f"reconcile_loop : {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main — orchestrateur
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def main():
+    if not os.getenv("DATABASE_URL"):
+        log.error("DATABASE_URL non défini")
+        sys.exit(1)
+    if not os.getenv("WS_TOKEN_ENCRYPTION_KEY"):
+        log.error("WS_TOKEN_ENCRYPTION_KEY non défini")
+        sys.exit(1)
+    # Au moins un provider doit être configuré
+    if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("OLLAMA_API_KEY"):
+        log.error("Aucun provider LLM configuré (ANTHROPIC_API_KEY ou OLLAMA_API_KEY)")
+        sys.exit(1)
+
+    Path(STORE_ROOT).mkdir(parents=True, exist_ok=True)
+
+    agents = await db.list_enabled_agents()
+    log.info(
+        f"📋 {len(agents)} agent(s) ENABLED — démarrage initial "
+        f"(reconcile chaque {RECONCILE_INTERVAL}s)"
+    )
+
+    # Pool partagé : agent.id → (runner, task)
+    runners: dict[str, tuple[AgentRunner, asyncio.Task]] = {}
+    for agent in agents:
+        runner = AgentRunner(agent)
+        task = asyncio.create_task(runner.run(), name=agent.slug)
+        runners[agent.id] = (runner, task)
+
+    # Boucle de reconciliation en background — démarre toujours,
+    # même si la liste initiale est vide (peut être peuplée plus tard via UI).
+    reconcile_task = asyncio.create_task(reconcile_loop(runners), name="reconcile")
+
+    try:
+        # On attend "indéfiniment" — les tasks runners vivent sous-jacentes.
+        # Si tous les runners terminent, le reconcile_loop continue à attendre
+        # et redémarrera dès qu'on créera un agent.
+        await reconcile_task
+    except KeyboardInterrupt:
+        log.info("Arrêt demandé")
+    except Exception as e:
+        log.error(f"Erreur fatale : {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

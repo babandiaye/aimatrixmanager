@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { can } from "@/lib/permissions";
+import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
 import {
   Card,
   CardContent,
@@ -16,6 +17,8 @@ export default async function NewAgentPage() {
   if (!can(session.user.role, "agents.create")) redirect("/agents");
 
   const serverName = process.env.MATRIX_SERVER_NAME ?? "matrix.example.com";
+  const ollamaEnabled = isOllamaConfigured();
+  const ollamaModels = ollamaEnabled ? await listOllamaModels() : [];
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -38,7 +41,11 @@ export default async function NewAgentPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <AgentForm serverName={serverName} />
+          <AgentForm
+            serverName={serverName}
+            ollamaModels={ollamaModels}
+            ollamaEnabled={ollamaEnabled}
+          />
         </CardContent>
       </Card>
     </div>

@@ -321,7 +321,7 @@ server {
 
 ## Bot runtime multi-agents
 
-Le **bot Python** (`/opt/matrix-synapse/bot/`) est le runtime qui fait tourner les agents IA. Il :
+Le **bot Python** ([`bot/`](bot/) dans ce repo) est le runtime qui fait tourner les agents IA. Il :
 
 - Lit la table `Agent` (status=`ENABLED`) au démarrage
 - Spawn N tâches asyncio, **une par agent**, chacune avec son propre `AsyncClient` matrix-nio

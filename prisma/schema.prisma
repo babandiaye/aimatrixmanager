@@ -25,6 +25,11 @@ enum AgentStatus {
   SUSPENDED
 }
 
+enum LLMProvider {
+  ANTHROPIC
+  OLLAMA
+}
+
 // ─── Settings système (singleton, id="global") ───────────────────────────────
 
 model SystemSettings {
@@ -107,9 +112,10 @@ model Agent {
   avatarUrl         String?
 
   // Config LLM
-  systemPrompt String  @db.Text
-  model        String  @default("claude-sonnet-4-6")
-  maxTokens    Int     @default(2048)
+  provider     LLMProvider @default(ANTHROPIC)
+  systemPrompt String      @db.Text
+  model        String      @default("claude-sonnet-4-6")
+  maxTokens    Int         @default(2048)
   temperature  Float?
 
   status     AgentStatus @default(DISABLED)
