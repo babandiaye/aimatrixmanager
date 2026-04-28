@@ -113,6 +113,8 @@ model Agent {
   temperature  Float?
 
   status     AgentStatus @default(DISABLED)
+  // Heartbeat : le bot Python met à jour ce champ toutes les 30s
+  lastHeartbeatAt DateTime?
   createdAt  DateTime    @default(now())
   updatedAt  DateTime    @updatedAt
 

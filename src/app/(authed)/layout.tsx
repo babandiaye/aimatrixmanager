@@ -35,7 +35,7 @@ export default async function AuthedLayout({
               await signOut({ redirectTo: "/login" });
             }}
           >
-            <Button type="submit" variant="outline" size="sm">
+            <Button type="submit" variant="destructive" size="sm">
               <ArrowLeftStartOnRectangleIcon className="size-4" />
               Déconnexion
             </Button>

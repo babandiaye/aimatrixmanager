@@ -145,6 +145,8 @@ export default async function AgentsPage({
                     <TableCell className="text-right">
                       <AgentRowActions
                         id={a.id}
+                        slug={a.slug}
+                        name={a.name}
                         status={a.status}
                         canUpdate={canUpdate}
                         canDelete={canDelete}

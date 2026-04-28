@@ -6,10 +6,13 @@ import { prisma } from "@/lib/prisma";
 import { assertCan } from "@/lib/permissions";
 import { decrypt } from "@/lib/crypto";
 import {
+  enableRoomEncryption,
   joinUserToRoom,
   listAllRooms,
+  setRoomName,
   userLeaveRoom,
 } from "@/lib/synapse-admin";
+import { z } from "zod";
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ mod: "rooms.actions" });
@@ -160,6 +163,69 @@ export async function toggleAssignmentEnabled(
     select: { roomId: true },
   });
   revalidatePath(`/rooms/${a.roomId}`);
+  revalidatePath("/rooms");
+}
+
+const renameSchema = z
+  .string()
+  .min(1, "Nom requis")
+  .max(255, "255 caractères maximum");
+
+/**
+ * Renomme un salon Matrix (state event m.room.name).
+ * Permission : `rooms.assign` (Admin/Manager).
+ */
+export async function renameRoom(roomId: string, newName: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "rooms.assign");
+
+  const parsed = renameSchema.safeParse(newName.trim());
+  if (!parsed.success) throw new Error(parsed.error.issues[0].message);
+
+  const room = await prisma.room.findUniqueOrThrow({
+    where: { id: roomId },
+    select: { matrixRoomId: true },
+  });
+
+  await setRoomName(room.matrixRoomId, parsed.data);
+  await prisma.room.update({
+    where: { id: roomId },
+    data: { name: parsed.data },
+  });
+
+  log.info(
+    { roomId: room.matrixRoomId, newName: parsed.data },
+    "Salon renommé",
+  );
+  revalidatePath(`/rooms/${roomId}`);
+  revalidatePath("/rooms");
+}
+
+/**
+ * Active le chiffrement E2EE d'un salon. Irréversible côté Matrix.
+ */
+export async function activateRoomEncryption(roomId: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "rooms.assign");
+
+  const room = await prisma.room.findUniqueOrThrow({
+    where: { id: roomId },
+    select: { matrixRoomId: true, isEncrypted: true },
+  });
+  if (room.isEncrypted) {
+    throw new Error("Le salon est déjà chiffré");
+  }
+
+  await enableRoomEncryption(room.matrixRoomId);
+  await prisma.room.update({
+    where: { id: roomId },
+    data: { isEncrypted: true },
+  });
+
+  log.info({ roomId: room.matrixRoomId }, "Chiffrement E2EE activé");
+  revalidatePath(`/rooms/${roomId}`);
   revalidatePath("/rooms");
 }
 

@@ -15,6 +15,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { ChevronLeftIcon, LockClosedIcon } from "@heroicons/react/24/outline";
 import { AssignmentsManager } from "./assignments-manager";
 import { CourseLinker } from "./course-linker";
+import { AdminCard } from "./admin-card";
 
 export default async function RoomDetailPage({
   params,
@@ -116,6 +117,15 @@ export default async function RoomDetailPage({
           )}
         </CardContent>
       </Card>
+
+      {canAssign && (
+        <AdminCard
+          roomId={room.id}
+          matrixRoomId={room.matrixRoomId}
+          currentName={room.name}
+          isEncrypted={room.isEncrypted}
+        />
+      )}
 
       <Card>
         <CardHeader>

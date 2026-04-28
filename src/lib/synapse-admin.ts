@@ -251,6 +251,80 @@ export async function userLeaveRoom(args: {
   }
 }
 
+/**
+ * Donne au caller (le user du SYNAPSE_ADMIN_TOKEN) le power level admin du salon.
+ * L'ajoute comme membre s'il n'est pas déjà dedans. Idempotent.
+ */
+async function makeAdminRoomAdmin(matrixRoomId: string): Promise<void> {
+  await call(
+    `/_synapse/admin/v1/rooms/${encodeURIComponent(matrixRoomId)}/make_room_admin`,
+    { method: "POST", body: {} },
+  );
+}
+
+/**
+ * Envoie un state event en utilisant l'access_token admin.
+ * Retry avec backoff si on tombe sur "not in room" — race avec make_room_admin
+ * qui n'a pas encore propagé la membership.
+ */
+async function putRoomState(
+  matrixRoomId: string,
+  eventType: string,
+  content: Record<string, unknown>,
+): Promise<void> {
+  const { homeserver, token } = getEnv();
+  const url = `${homeserver}/_matrix/client/v3/rooms/${encodeURIComponent(
+    matrixRoomId,
+  )}/state/${eventType}/`;
+
+  const delays = [200, 400, 800, 1500]; // ms — total ~3s en cumulé
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(content),
+    });
+    if (res.ok) return;
+    const text = await res.text();
+    // Ne retry que la race make_room_admin → propagation
+    const racing =
+      res.status === 403 && /not in room/i.test(text) && attempt < delays.length;
+    if (!racing) {
+      throw new Error(`PUT state ${eventType}: ${res.status} ${text}`);
+    }
+    log.info(
+      { attempt: attempt + 1, delay: delays[attempt] },
+      "Retry state PUT (race membership)",
+    );
+    await new Promise((r) => setTimeout(r, delays[attempt]));
+  }
+}
+
+/** Renomme un salon (m.room.name). Promeut l'admin caller au passage. */
+export async function setRoomName(
+  matrixRoomId: string,
+  newName: string,
+): Promise<void> {
+  await makeAdminRoomAdmin(matrixRoomId);
+  await putRoomState(matrixRoomId, "m.room.name", { name: newName });
+}
+
+/**
+ * Active le chiffrement E2EE sur un salon (m.room.encryption avec algorithme Megolm v1).
+ * **Irréversible** côté Matrix : un salon chiffré ne peut jamais redevenir clair.
+ */
+export async function enableRoomEncryption(
+  matrixRoomId: string,
+): Promise<void> {
+  await makeAdminRoomAdmin(matrixRoomId);
+  await putRoomState(matrixRoomId, "m.room.encryption", {
+    algorithm: "m.megolm.v1.aes-sha2",
+  });
+}
+
 /** Itère toutes les pages pour récupérer la liste complète. */
 export async function listAllRooms(): Promise<SynapseRoom[]> {
   const rooms: SynapseRoom[] = [];

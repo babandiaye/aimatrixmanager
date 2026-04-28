@@ -11,6 +11,7 @@ import { encrypt } from "@/lib/crypto";
 import {
   buildMxid,
   clientLoginWithPassword,
+  deactivateUser,
   resetUserPassword,
   setUserDisplayName,
   upsertUser,
@@ -215,14 +216,44 @@ export async function setAgentStatus(
   revalidatePath("/agents");
 }
 
+/**
+ * Supprime définitivement un agent :
+ *  1. Désactive le compte Matrix côté Synapse (`deactivate`, irréversible)
+ *  2. Supprime la row Agent (cascade → RoomAgent + AuditLog + KnowledgeChunk)
+ *
+ * Si la désactivation Matrix échoue (ex: réseau Synapse down), on stoppe
+ * — pas d'orphan Matrix sans suppression DB ou inversement.
+ */
 export async function deleteAgent(id: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
   assertCan(session.user.role, "agents.delete");
 
-  // On supprime juste de notre DB. Le compte Matrix reste (réutilisable plus tard).
-  // Pour le désactiver côté Synapse, on ajoutera plus tard une action séparée.
+  const agent = await prisma.agent.findUniqueOrThrow({
+    where: { id },
+    select: { slug: true, matrixUserId: true },
+  });
+
+  try {
+    await deactivateUser(agent.slug);
+    log.info(
+      { slug: agent.slug, mxid: agent.matrixUserId },
+      "Agent désactivé côté Matrix",
+    );
+  } catch (e) {
+    // M_NOT_FOUND : le compte Matrix n'existe déjà plus, on continue
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/M_NOT_FOUND/i.test(msg)) {
+      log.error({ err: e, slug: agent.slug }, "Échec désactivation Matrix");
+      throw new Error(
+        `Désactivation Matrix échouée — agent non supprimé : ${msg}`,
+      );
+    }
+    log.info({ slug: agent.slug }, "Compte Matrix déjà absent, on continue");
+  }
+
   await prisma.agent.delete({ where: { id } });
+  log.info({ slug: agent.slug }, "Agent supprimé");
   revalidatePath("/agents");
 }
 

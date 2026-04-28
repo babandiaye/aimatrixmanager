@@ -110,6 +110,9 @@ export default async function UsersPage() {
                         currentRole={u.role}
                         isSelf={isSelf}
                         isLastAdmin={isLastAdmin}
+                        isLocal={Boolean(u.passwordHash)}
+                        email={u.email}
+                        name={u.name}
                       />
                     </TableCell>
                   </TableRow>

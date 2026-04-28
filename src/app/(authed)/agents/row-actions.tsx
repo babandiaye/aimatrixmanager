@@ -13,18 +13,22 @@ import {
 } from "@/components/ui/select";
 import {
   PencilSquareIcon,
-  TrashIcon,
   ArrowPathIcon,
 } from "@heroicons/react/24/outline";
-import { deleteAgent, rotateAgentToken, setAgentStatus } from "./actions";
+import { rotateAgentToken, setAgentStatus } from "./actions";
+import { AgentDeleteDialog } from "./agent-delete-dialog";
 
 export function AgentRowActions({
   id,
+  slug,
+  name,
   status,
   canUpdate,
   canDelete,
 }: {
   id: string;
+  slug: string;
+  name: string;
   status: AgentStatus;
   canUpdate: boolean;
   canDelete: boolean;
@@ -90,32 +94,7 @@ export function AgentRowActions({
           </Link>
         </>
       )}
-      {canDelete && (
-        <Button
-          type="button"
-          variant="destructive"
-          size="icon-sm"
-          disabled={pending}
-          title="Supprimer"
-          onClick={() => {
-            if (
-              !confirm(
-                "Supprimer l'agent ? (le compte Matrix reste — sera retiré séparément)",
-              )
-            )
-              return;
-            start(async () => {
-              try {
-                await deleteAgent(id);
-              } catch (e) {
-                alert(e instanceof Error ? e.message : "Erreur");
-              }
-            });
-          }}
-        >
-          <TrashIcon className="size-4" />
-        </Button>
-      )}
+      {canDelete && <AgentDeleteDialog agentId={id} slug={slug} name={name} />}
     </div>
   );
 }
