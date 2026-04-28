@@ -187,14 +187,14 @@ DATABASE_URL="postgresql://aimatrix_user:CHANGEME@127.0.0.1:5432/aimatrixmanager
 # ─── NextAuth ───────────────────────────────────────────────────
 AUTH_SECRET=""                # openssl rand -base64 32
 AUTH_TRUST_HOST="true"
-NEXTAUTH_URL="https://aibotmanager.unchk.sn"   # prod uniquement
+NEXTAUTH_URL="https://ai.example.com"   # prod uniquement
 
 # ─── Admin initial (utilisé par `pnpm db:seed` uniquement) ──────
-ADMIN_INITIAL_EMAIL="admin@unchk.sn"
+ADMIN_INITIAL_EMAIL="admin@example.com"
 ADMIN_INITIAL_PASSWORD="ChangeMeNow!"
 
 # ─── Keycloak (vide = désactivé, fallback credentials) ──────────
-KEYCLOAK_ISSUER="https://senid.unchk.sn/realms/UNCHK"
+KEYCLOAK_ISSUER="https://keycloak.example.com/realms/EXAMPLE"
 KEYCLOAK_CLIENT_ID="aibotmanager"
 KEYCLOAK_CLIENT_SECRET=""
 
@@ -206,7 +206,7 @@ LOG_LEVEL="info"
 
 # ─── Matrix / Synapse ───────────────────────────────────────────
 MATRIX_HOMESERVER="http://127.0.0.1:8008"
-MATRIX_SERVER_NAME="formation1-matrix.unchk.sn"
+MATRIX_SERVER_NAME="matrix.example.com"
 SYNAPSE_ADMIN_TOKEN=""
 
 # ─── Chiffrement secrets DB (AES-256-GCM, NE JAMAIS PERDRE) ─────
@@ -301,10 +301,10 @@ sudo tail -f /var/log/aimatrixmanager_output.log
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name aibotmanager.unchk.sn;
+    server_name ai.example.com;
 
-    ssl_certificate     /etc/letsencrypt/live/aibotmanager.unchk.sn/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/aibotmanager.unchk.sn/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/ai.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ai.example.com/privkey.pem;
 
     location / {
         proxy_pass         http://127.0.0.1:3000;
@@ -450,10 +450,10 @@ Premier login Keycloak → compte créé en DB avec rôle `AUDITOR` → un admin
 
 ```bash
 # Interactif (saisie masquée)
-pnpm user:password admin@unchk.sn
+pnpm user:password admin@example.com
 
 # Via env (pas d'historique shell)
-ADMIN_EMAIL=admin@unchk.sn ADMIN_PASSWORD='nouveau' pnpm user:password
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='nouveau' pnpm user:password
 ```
 
 ---
