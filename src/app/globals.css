@@ -1,0 +1,127 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─── Tokens primitifs (génèrent utilities + variables :root) ──────────── */
+@theme {
+  /* Polices */
+  --font-sans: system-ui, "Segoe UI", Arial, sans-serif;
+  --font-mono: ui-monospace, "Geist Mono", Menlo, Consolas, monospace;
+  --font-heading: system-ui, "Segoe UI", Arial, sans-serif;
+
+  /* Border radius — conformes charte UNCHK */
+  --radius-sm: 0.25rem;  /* 4px badges */
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;   /* 8px boutons */
+  --radius-xl: 0.75rem;  /* 12px feature cards */
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.5rem;
+
+  /* Couleurs UNCHK additionnelles */
+  --color-institutional: #0065b1;
+
+  /* Statuts BBB */
+  --color-status-published: #16a34a;
+  --color-status-processed: #ea580c;
+  --color-status-unpublished: #d97706;
+  --color-status-processing: #9333ea;
+  --color-status-error: #dc2626;
+}
+
+/* ─── Tokens sémantiques (référencent :root pour le dark mode) ─────────── */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-sidebar-active-border: var(--sidebar-active-border);
+  --color-sidebar-border: var(--sidebar-border);
+}
+
+/* ─── Palette UNCHK (light) ───────────────────────────────────────────── */
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+
+  --primary: #1d4ed8;             /* Bleu UNCHK — CTA / actifs */
+  --primary-foreground: #ffffff;
+  --secondary: #eff6ff;
+  --secondary-foreground: #1d4ed8;
+  --accent: #eff6ff;
+  --accent-foreground: #1d4ed8;
+
+  --destructive: #dc2626;
+  --ring: #1d4ed8;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #0f172a;
+  --sidebar-active: #eff6ff;
+  --sidebar-active-border: #1d4ed8;
+  --sidebar-border: #e2e8f0;
+
+  --radius: 0.5rem;
+}
+
+.dark {
+  --background: #0f172a;
+  --foreground: #f8fafc;
+  --card: #1e293b;
+  --card-foreground: #f8fafc;
+  --popover: #1e293b;
+  --popover-foreground: #f8fafc;
+  --muted: #1e293b;
+  --muted-foreground: #94a3b8;
+  --border: #334155;
+  --input: #334155;
+  --secondary: #1e3a8a;
+  --secondary-foreground: #dbeafe;
+  --accent: #1e3a8a;
+  --accent-foreground: #dbeafe;
+  --sidebar: #0f172a;
+  --sidebar-foreground: #f8fafc;
+  --sidebar-active: #1e3a8a;
+  --sidebar-border: #334155;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    font-family: var(--font-sans);
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  code, kbd, pre, samp {
+    font-family: var(--font-mono);
+  }
+}

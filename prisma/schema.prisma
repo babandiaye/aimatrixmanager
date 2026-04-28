@@ -1,0 +1,263 @@
+// Prisma schema — aimatrixmanager
+// Postgres 15 + pgvector. Vector dim = 1536 (OpenAI text-embedding-3-small / Voyage large).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [vector]
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  AUDITOR
+}
+
+enum AgentStatus {
+  ENABLED
+  DISABLED
+  SUSPENDED
+}
+
+// ─── Settings système (singleton, id="global") ───────────────────────────────
+
+model SystemSettings {
+  id              String   @id @default("global")
+  keycloakEnabled Boolean  @default(true)
+  updatedAt       DateTime @updatedAt
+  updatedById     String?
+}
+
+// ─── Auth / Admin users ───────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  passwordHash  String?   // null si l'utilisateur ne se connecte qu'en OIDC
+  role          UserRole  @default(AUDITOR)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts Account[]
+  sessions Session[]
+
+  createdAgents       Agent[]      @relation("AgentCreator")
+  createdAssignments  RoomAgent[]  @relation("AssignmentCreator")
+}
+
+// Tables Auth.js / NextAuth — schéma standard requis par @auth/prisma-adapter
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Agent IA ─────────────────────────────────────────────────────────────────
+
+model Agent {
+  id          String      @id @default(cuid())
+  // Identifiant Matrix
+  slug        String      @unique // utilisé dans la mention @<slug>, ex. "kocc-barma"
+  name        String      // display name
+  description String?
+  matrixUserId      String   @unique // "@kocc-barma:formation1-matrix.unchk.sn"
+  matrixDeviceId    String?
+  matrixAccessToken String?  // sensible — à chiffrer au repos en prod
+  avatarUrl         String?
+
+  // Config LLM
+  systemPrompt String  @db.Text
+  model        String  @default("claude-sonnet-4-6")
+  maxTokens    Int     @default(2048)
+  temperature  Float?
+
+  status     AgentStatus @default(DISABLED)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  createdById String?
+  createdBy   User?    @relation("AgentCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  assignments      RoomAgent[]
+  auditLogs        AuditLog[]
+  knowledgeChunks  KnowledgeChunk[]
+
+  @@index([status])
+}
+
+// ─── Plateformes Moodle (référentiel) ─────────────────────────────────────────
+// Chaque plateforme = une instance Moodle (DISI, P11STN, ...) avec ses creds Web Services.
+
+model MoodlePlatform {
+  id          String   @id @default(cuid())
+  key         String   @unique   // "DISI", "P11STN" — identifiant court réutilisable
+  name        String              // "Moodle DISI"
+  baseUrl     String              // "https://moodle.disi.unchk.sn" (sans / final)
+  wsToken     String   @db.Text   // token Moodle Web Services
+  wsUsername  String?             // login du compte service côté Moodle (optionnel)
+  enabled     Boolean  @default(true)
+  lastSyncedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?
+
+  courses MoodleCourse[]
+
+  @@index([enabled])
+}
+
+// ─── Cours Moodle (synchronisés) ──────────────────────────────────────────────
+
+model MoodleCourse {
+  id           String   @id @default(cuid())
+  platformId   String
+  platform     MoodlePlatform @relation(fields: [platformId], references: [id], onDelete: Cascade)
+  moodleId     Int      // course id côté Moodle
+  shortname    String
+  fullname     String
+  lastSyncedAt DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  rooms Room[]
+
+  @@unique([platformId, moodleId])
+  @@index([platformId])
+}
+
+// ─── Salons Matrix découverts ─────────────────────────────────────────────────
+
+model Room {
+  id            String   @id @default(cuid())
+  matrixRoomId  String   @unique // "!abc:server"
+  name          String?
+  topic         String?
+  isDirect      Boolean  @default(false) // DM si <= 2 membres
+  isEncrypted   Boolean  @default(false)
+
+  moodleCourseId String?
+  moodleCourse   MoodleCourse? @relation(fields: [moodleCourseId], references: [id], onDelete: SetNull)
+
+  discoveredAt DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignments RoomAgent[]
+  auditLogs   AuditLog[]
+
+  @@index([moodleCourseId])
+}
+
+// ─── Affectation room ↔ agent ─────────────────────────────────────────────────
+
+model RoomAgent {
+  id      String  @id @default(cuid())
+  roomId  String
+  agentId String
+  room    Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  agent   Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  enabled Boolean @default(true)
+
+  assignedById String?
+  assignedBy   User?    @relation("AssignmentCreator", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  knowledgeChunks KnowledgeChunk[]
+
+  @@unique([roomId, agentId])
+  @@index([agentId])
+}
+
+// ─── Audit conversations ──────────────────────────────────────────────────────
+
+model AuditLog {
+  id      String @id @default(cuid())
+  roomId  String
+  agentId String
+  room    Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  agent   Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  matrixEventId String? @unique // pour dédup
+  senderMxid    String          // "@etudiant:server"
+  userMessage   String  @db.Text
+  agentResponse String? @db.Text
+
+  // Coût / observabilité
+  inputTokens      Int?
+  outputTokens     Int?
+  cacheReadTokens  Int?
+  cacheWriteTokens Int?
+  latencyMs        Int?
+  error            String?
+
+  createdAt DateTime @default(now())
+
+  @@index([roomId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([senderMxid])
+}
+
+// ─── Base de connaissances RAG ────────────────────────────────────────────────
+// Un chunk peut être :
+//   - global à un agent (roomAgentId = null) → présent dans toutes ses rooms
+//   - spécifique à une assignation (roomAgentId = X) → seulement dans cette room
+
+model KnowledgeChunk {
+  id          String      @id @default(cuid())
+  agentId     String
+  agent       Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  roomAgentId String?
+  roomAgent   RoomAgent?  @relation(fields: [roomAgentId], references: [id], onDelete: Cascade)
+
+  content     String      @db.Text
+  embedding   Unsupported("vector(1536)")?
+  source      String?     // ex. "moodle:course:42:resource:1234"
+  tokenCount  Int?
+
+  createdAt   DateTime    @default(now())
+
+  @@index([agentId])
+  @@index([roomAgentId])
+}
