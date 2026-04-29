@@ -38,6 +38,12 @@ enum RoomSource {
   MOODLE
 }
 
+// Événements d'authentification — pour audit & forensic.
+enum AuthEventType {
+  SIGN_IN
+  SIGN_OUT
+}
+
 // ─── Settings système (singleton, id="global") ───────────────────────────────
 
 model SystemSettings {
@@ -64,6 +70,7 @@ model User {
 
   createdAgents       Agent[]      @relation("AgentCreator")
   createdAssignments  RoomAgent[]  @relation("AssignmentCreator")
+  authAuditLogs       AuthAuditLog[]
 }
 
 // Tables Auth.js / NextAuth — schéma standard requis par @auth/prisma-adapter
@@ -103,6 +110,23 @@ model VerificationToken {
   expires    DateTime
 
   @@unique([identifier, token])
+}
+
+// ─── Audit auth (sign-in / sign-out) ─────────────────────────────────────────
+// Forensic des connexions — distinct d'AuditLog (qui trace les conversations
+// agent ↔ étudiant). On garde l'email même si le User est supprimé (SetNull).
+
+model AuthAuditLog {
+  id        String        @id @default(cuid())
+  type      AuthEventType
+  userId    String?
+  user      User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String?       // capturé au moment de l'événement
+  provider  String?       // "credentials" | "keycloak"
+  createdAt DateTime      @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
 }
 
 // ─── Agent IA ─────────────────────────────────────────────────────────────────

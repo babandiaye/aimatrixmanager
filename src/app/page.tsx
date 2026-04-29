@@ -197,7 +197,7 @@ export default async function LandingPage() {
                   },
                   {
                     color: "text-status-published",
-                    text: "Comprend le contexte du cours (Moodle Web Services)",
+                    text: "Comprend le contexte du cours",
                   },
                   {
                     color: "text-status-processed",

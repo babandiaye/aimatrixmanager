@@ -156,42 +156,126 @@ class AgentRunner:
     def is_dm(self, room: MatrixRoom) -> bool:
         return len(room.users) <= 2
 
-    # ── LLM (Anthropic ou Ollama selon agent.provider) ───────────────────────
-    async def ask_llm(
-        self, room_id: str, question: str, sender: str
-    ) -> tuple[str, dict]:
-        history = self.history.setdefault(room_id, [])
-        history.append({"role": "user", "content": question})
-        try:
-            answer, usage = await llm.call(self.row, history, MAX_HISTORY)
-            history.append({"role": "assistant", "content": answer})
-            # Purge mémoire
-            if len(history) > MAX_HISTORY * 2:
-                del history[: len(history) - MAX_HISTORY * 2]
-            return answer, usage
-        except Exception as e:
-            self.log.error(f"Erreur LLM ({self.row.provider}) : {e}")
-            raise
-
     # ── Envoi ─────────────────────────────────────────────────────────────────
-    async def send(self, room_id: str, text: str):
+    async def _ensure_megolm(self, room_id: str):
+        """Partage la session Megolm si la room est chiffrée. No-op sinon."""
+        room = self.client.rooms.get(room_id)
+        if room and room.encrypted:
+            try:
+                await self.client.share_group_session(
+                    room_id=room_id, ignore_unverified_devices=True
+                )
+            except Exception as e:
+                self.log.warning(f"share_group_session: {e}")
+
+    async def send(self, room_id: str, text: str) -> Optional[str]:
         try:
-            room = self.client.rooms.get(room_id)
-            if room and room.encrypted:
-                try:
-                    await self.client.share_group_session(
-                        room_id=room_id, ignore_unverified_devices=True
-                    )
-                except Exception as e:
-                    self.log.warning(f"share_group_session: {e}")
-            await self.client.room_send(
+            await self._ensure_megolm(room_id)
+            resp = await self.client.room_send(
                 room_id=room_id,
                 message_type="m.room.message",
                 content={"msgtype": "m.text", "body": text},
                 ignore_unverified_devices=True,
             )
+            return getattr(resp, "event_id", None)
         except Exception as e:
             self.log.error(f"Erreur envoi {room_id}: {e}")
+            return None
+
+    async def _edit_message(self, room_id: str, event_id: str, new_text: str):
+        """Édit un message via m.replace (MSC2676)."""
+        await self._ensure_megolm(room_id)
+        content = {
+            "msgtype": "m.text",
+            "body": f"* {new_text}",  # fallback display pour clients non-edit
+            "m.new_content": {"msgtype": "m.text", "body": new_text},
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": event_id,
+            },
+        }
+        try:
+            await self.client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=content,
+                ignore_unverified_devices=True,
+            )
+        except Exception as e:
+            self.log.warning(f"Édit message {event_id[:20]}: {e}")
+
+    # ── LLM streaming ─────────────────────────────────────────────────────────
+    # Throttle : on n'édite pas plus d'une fois par seconde et seulement si
+    # >100 char ont été ajoutés depuis la dernière édition. Évite de spammer
+    # les serveurs Synapse (rate-limit) et les clients (re-render à chaque
+    # event). Seuils réglables via STREAM_EDIT_INTERVAL / STREAM_EDIT_DELTA.
+    # Matrix limite la fréquence des messages côté Synapse (rc_message ~0.2/s
+    # en régime stable, burst 10). 400ms / 25 chars donne du token-par-token
+    # quasi instantané sans risquer le 429.
+    STREAM_EDIT_INTERVAL = float(os.getenv("STREAM_EDIT_INTERVAL", "0.4"))
+    STREAM_EDIT_DELTA = int(os.getenv("STREAM_EDIT_DELTA", "25"))
+
+    async def ask_llm_streaming(
+        self, room_id: str, question: str
+    ) -> tuple[str, dict]:
+        """Place un placeholder, stream la réponse LLM en éditant
+        progressivement, puis retourne (texte_final, usage)."""
+        history = self.history.setdefault(room_id, [])
+        history.append({"role": "user", "content": question})
+
+        # 1. Placeholder visible immédiatement
+        placeholder_id = await self.send(room_id, "💭 …")
+        if not placeholder_id:
+            # Synapse n'a pas accepté l'envoi — on tombe en mode bloquant
+            answer, usage = await llm.call(self.row, history, MAX_HISTORY)
+            await self.send(room_id, answer)
+            history.append({"role": "assistant", "content": answer})
+            return answer, usage
+
+        buffer = ""
+        last_edit_t = time.monotonic()
+        last_edit_len = 0
+        usage: dict = {}
+
+        try:
+            async for chunk, u in llm.stream_call(
+                self.row, history, MAX_HISTORY
+            ):
+                if chunk:
+                    buffer += chunk
+                if u is not None:
+                    usage = u
+                # Throttle : édite si l'intervalle est écoulé OU le delta
+                # dépasse le seuil. OR (pas AND) — sur un débit lent
+                # l'intervalle déclenche même avec peu de texte ; sur un
+                # gros chunk soudain le delta déclenche immédiatement.
+                now = time.monotonic()
+                if buffer and (
+                    now - last_edit_t >= self.STREAM_EDIT_INTERVAL
+                    or len(buffer) - last_edit_len >= self.STREAM_EDIT_DELTA
+                ):
+                    await self._edit_message(room_id, placeholder_id, buffer)
+                    self.log.info(
+                        f"stream edit @ {len(buffer)} chars for {room_id[:25]}"
+                    )
+                    last_edit_t = now
+                    last_edit_len = len(buffer)
+        except Exception as e:
+            self.log.error(f"Streaming LLM ({self.row.provider}) : {e}")
+            # Fallback : édit avec un message d'erreur si on n'a rien streamé
+            if not buffer:
+                buffer = "❌ Désolé, je rencontre un problème technique."
+
+        # Édit final — toujours envoyé pour garantir le contenu complet,
+        # même si la dernière édition throttle l'avait sauté.
+        if buffer:
+            await self._edit_message(room_id, placeholder_id, buffer)
+
+        history.append({"role": "assistant", "content": buffer})
+        # Purge mémoire
+        if len(history) > MAX_HISTORY * 2:
+            del history[: len(history) - MAX_HISTORY * 2]
+        return buffer, usage
 
     # ── Pipeline message ──────────────────────────────────────────────────────
     async def handle_text(self, room: MatrixRoom, event: RoomMessageText):
@@ -226,14 +310,14 @@ class AgentRunner:
         usage = {}
         err = None
         try:
-            answer, usage = await self.ask_llm(room.room_id, body, event.sender)
+            # Streaming : place un placeholder, édite progressivement.
+            # Le fallback non-streaming est géré dans ask_llm_streaming.
+            answer, usage = await self.ask_llm_streaming(room.room_id, body)
         except Exception as e:
             err = str(e)
             answer = "❌ Désolé, je rencontre un problème technique."
-        latency_ms = int((time.monotonic() - t0) * 1000)
-
-        if answer:
             await self.send(room.room_id, answer)
+        latency_ms = int((time.monotonic() - t0) * 1000)
 
         # Audit
         try:
@@ -348,6 +432,23 @@ async def _stop_runner(runner: "AgentRunner", task: asyncio.Task) -> None:
             pass
 
 
+# Champs de config qu'on peut hot-reload sans relancer la session Matrix.
+# Tout le reste (slug, matrixUserId, accessToken, deviceId) nécessiterait un
+# restart complet du runner — rare en pratique (changement après création).
+_HOT_RELOAD_FIELDS = (
+    "system_prompt",
+    "model",
+    "max_tokens",
+    "temperature",
+    "provider",
+    "name",
+)
+
+
+def _config_changed(old: db.AgentRow, new: db.AgentRow) -> list[str]:
+    return [f for f in _HOT_RELOAD_FIELDS if getattr(old, f) != getattr(new, f)]
+
+
 async def reconcile_runners(
     runners: dict[str, tuple["AgentRunner", asyncio.Task]],
 ) -> None:
@@ -379,6 +480,19 @@ async def reconcile_runners(
             runner = AgentRunner(agent)
             task = asyncio.create_task(runner.run(), name=agent.slug)
             runners[agent.id] = (runner, task)
+            continue
+
+        # 4. Hot-reload de config — si systemPrompt, model, temp, etc. ont
+        # changé en DB, on swap le row in-place sans tuer la session Matrix.
+        # Le prochain message utilisera la nouvelle config. L'historique de
+        # conversation est préservé (utile pour ne pas perturber l'utilisateur).
+        runner, _ = runners[agent.id]
+        diff = _config_changed(runner.row, agent)
+        if diff:
+            log.info(
+                f"⚙️  Reload config {agent.slug} — champs modifiés : {', '.join(diff)}"
+            )
+            runner.row = agent
 
 
 async def reconcile_loop(
