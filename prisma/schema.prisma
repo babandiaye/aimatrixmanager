@@ -161,8 +161,33 @@ model Agent {
   assignments      RoomAgent[]
   auditLogs        AuditLog[]
   knowledgeChunks  KnowledgeChunk[]
+  crossSigning     AgentCrossSigning?
 
   @@index([status])
+}
+
+// ─── Cross-signing E2EE par agent ─────────────────────────────────────────────
+// Une ligne par agent une fois le cross-signing initialisé. La master key
+// signe SSK + USK ; SSK signe les devices. On garde sskPriv (chiffré) pour
+// re-signer le device en cas de rotation (rotateAgentToken). On NE garde PAS
+// masterPriv ni uskPriv (besoin one-shot) — réduction de surface.
+//
+// deviceSignedAt est null tant que le device n'a pas encore été signé par SSK
+// (cas typique : à la création d'un agent, le bot Python n'a pas encore
+// uploadé ses keys via /keys/upload — la signature device se fait dans un
+// second temps via signAgentDevice()).
+
+model AgentCrossSigning {
+  agentId        String   @id
+  agent          Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  masterPubKey   String   // base64 unpadded, 32 bytes Ed25519 — visible publiquement
+  sskPubKey      String   // base64 unpadded
+  uskPubKey      String   // base64 unpadded
+  sskPrivEnc     String   @db.Text // AES-256-GCM enc:v1: pour re-signer un device
+  signedDeviceId String?            // device_id qui a été signé par SSK
+  deviceSignedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
 
 // ─── Plateformes Moodle (référentiel) ─────────────────────────────────────────
