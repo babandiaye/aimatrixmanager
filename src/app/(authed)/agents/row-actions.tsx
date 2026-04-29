@@ -14,8 +14,13 @@ import {
 import {
   PencilSquareIcon,
   ArrowPathIcon,
+  ShieldCheckIcon,
 } from "@heroicons/react/24/outline";
-import { rotateAgentToken, setAgentStatus } from "./actions";
+import {
+  rotateAgentToken,
+  setAgentStatus,
+  signAgentDeviceAction,
+} from "./actions";
 import { AgentDeleteDialog } from "./agent-delete-dialog";
 
 export function AgentRowActions({
@@ -25,6 +30,7 @@ export function AgentRowActions({
   status,
   canUpdate,
   canDelete,
+  xsState,
 }: {
   id: string;
   slug: string;
@@ -32,6 +38,7 @@ export function AgentRowActions({
   status: AgentStatus;
   canUpdate: boolean;
   canDelete: boolean;
+  xsState: "verified" | "partial" | "missing";
 }) {
   const [pending, start] = useTransition();
 
@@ -70,7 +77,7 @@ export function AgentRowActions({
             variant="outline"
             size="icon-sm"
             disabled={pending}
-            title="Régénérer le token Matrix"
+            title="Régénérer le token Matrix (réinitialise aussi le cross-signing)"
             onClick={() => {
               if (!confirm("Régénérer le token d'accès Matrix de cet agent ?"))
                 return;
@@ -85,6 +92,26 @@ export function AgentRowActions({
           >
             <ArrowPathIcon className="size-4" />
           </Button>
+          {xsState === "partial" && (
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-sm"
+              disabled={pending}
+              title="Signer le device courant avec la SSK (à faire APRÈS que le bot ait démarré)"
+              onClick={() => {
+                start(async () => {
+                  try {
+                    await signAgentDeviceAction(id);
+                  } catch (e) {
+                    alert(e instanceof Error ? e.message : "Erreur");
+                  }
+                });
+              }}
+            >
+              <ShieldCheckIcon className="size-4" />
+            </Button>
+          )}
           <Link
             href={`/agents/${id}/edit`}
             className={buttonVariants({ variant: "outline", size: "icon-sm" })}

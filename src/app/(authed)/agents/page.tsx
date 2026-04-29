@@ -21,7 +21,11 @@ import {
 import { buttonVariants } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Pagination } from "@/components/ui/pagination";
-import { PlusIcon } from "@heroicons/react/24/outline";
+import {
+  PlusIcon,
+  ShieldCheckIcon,
+  ShieldExclamationIcon,
+} from "@heroicons/react/24/outline";
 import { AgentRowActions } from "./row-actions";
 
 const PAGE_SIZE = 10;
@@ -48,7 +52,12 @@ export default async function AgentsPage({
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
-      include: { _count: { select: { assignments: true } } },
+      include: {
+        _count: { select: { assignments: true } },
+        crossSigning: {
+          select: { signedDeviceId: true, masterPubKey: true },
+        },
+      },
     }),
   ]);
 
@@ -102,58 +111,95 @@ export default async function AgentsPage({
                   <TableHead>Nom</TableHead>
                   <TableHead>Modèle</TableHead>
                   <TableHead>Salons</TableHead>
+                  <TableHead>E2EE</TableHead>
                   <TableHead>Statut</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {agents.map((a) => (
-                  <TableRow key={a.id}>
-                    <TableCell className="font-mono text-xs">
-                      <div>{a.slug}</div>
-                      <div className="text-[10px] text-muted-foreground">
-                        {a.matrixUserId}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div>{a.name}</div>
-                      {a.description && (
-                        <div className="text-xs text-muted-foreground line-clamp-1">
-                          {a.description}
+                {agents.map((a) => {
+                  const xs = a.crossSigning;
+                  const xsState: "verified" | "partial" | "missing" = !xs
+                    ? "missing"
+                    : xs.signedDeviceId === a.matrixDeviceId
+                      ? "verified"
+                      : "partial";
+                  return (
+                    <TableRow key={a.id}>
+                      <TableCell className="font-mono text-xs">
+                        <div>{a.slug}</div>
+                        <div className="text-[10px] text-muted-foreground">
+                          {a.matrixUserId}
                         </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {a.model}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {a._count.assignments}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge
-                        status={
-                          a.status === "ENABLED"
-                            ? "published"
-                            : a.status === "SUSPENDED"
-                              ? "error"
-                              : "unpublished"
-                        }
-                      >
-                        {a.status}
-                      </StatusBadge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <AgentRowActions
-                        id={a.id}
-                        slug={a.slug}
-                        name={a.name}
-                        status={a.status}
-                        canUpdate={canUpdate}
-                        canDelete={canDelete}
-                      />
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      </TableCell>
+                      <TableCell>
+                        <div>{a.name}</div>
+                        {a.description && (
+                          <div className="text-xs text-muted-foreground line-clamp-1">
+                            {a.description}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {a.model}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {a._count.assignments}
+                      </TableCell>
+                      <TableCell>
+                        {xsState === "verified" ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-xs text-status-published"
+                            title="Master + SSK uploadées, device signé. Plus de bouclier rouge dans Element."
+                          >
+                            <ShieldCheckIcon className="size-3.5" />
+                            Vérifié
+                          </span>
+                        ) : xsState === "partial" ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-xs text-status-unpublished"
+                            title="Master uploadée, mais le device courant n'est pas encore signé par SSK. Clique sur 'Signer device'."
+                          >
+                            <ShieldExclamationIcon className="size-3.5" />
+                            Partiel
+                          </span>
+                        ) : (
+                          <span
+                            className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                            title="Pas de cross-signing — bouclier rouge sur les messages. Lance 'Régénérer token' pour activer."
+                          >
+                            <ShieldExclamationIcon className="size-3.5" />
+                            —
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge
+                          status={
+                            a.status === "ENABLED"
+                              ? "published"
+                              : a.status === "SUSPENDED"
+                                ? "error"
+                                : "unpublished"
+                          }
+                        >
+                          {a.status}
+                        </StatusBadge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <AgentRowActions
+                          id={a.id}
+                          slug={a.slug}
+                          name={a.name}
+                          status={a.status}
+                          canUpdate={canUpdate}
+                          canDelete={canDelete}
+                          xsState={xsState}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
 

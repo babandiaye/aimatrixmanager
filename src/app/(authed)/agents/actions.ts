@@ -7,7 +7,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertCan } from "@/lib/permissions";
-import { encrypt } from "@/lib/crypto";
+import { decrypt, encrypt } from "@/lib/crypto";
 import {
   buildMxid,
   clientLoginWithPassword,
@@ -17,6 +17,7 @@ import {
   upsertUser,
   userExists,
 } from "@/lib/synapse-admin";
+import { setupCrossSigningForAgent, signAgentDevice } from "@/lib/agent-cross-signing";
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ mod: "agents.actions" });
@@ -154,7 +155,7 @@ export async function createAgent(
   }
 
   // 2. Insertion DB (token chiffré + device_id)
-  await prisma.agent.create({
+  const created = await prisma.agent.create({
     data: {
       slug: parsed.data.slug,
       name: parsed.data.name,
@@ -170,7 +171,28 @@ export async function createAgent(
       status: "DISABLED", // toujours désactivé par défaut, l'admin active après
       createdById: session.user.id,
     },
+    select: { id: true },
   });
+
+  // 3. Cross-signing E2EE (best-effort) — élimine le bouclier rouge dans
+  //    Element. Le password est encore en mémoire (pour l'UIA), c'est le
+  //    seul moment opportun. Si ça échoue (Synapse refuse, réseau down),
+  //    on log mais on n'annule pas la création — l'admin peut retenter via
+  //    rotateAgentToken qui régénère un password et relance le setup.
+  try {
+    await setupCrossSigningForAgent({
+      agentId: created.id,
+      userId: mxid,
+      localpart: parsed.data.slug,
+      password,
+      accessToken,
+    });
+  } catch (e) {
+    log.warn(
+      { err: e, slug: parsed.data.slug },
+      "Setup cross-signing échoué (agent créé sans XS — retry via rotateAgentToken)",
+    );
+  }
 
   log.info({ slug: parsed.data.slug, mxid }, "Agent créé");
   revalidatePath("/agents");
@@ -301,7 +323,7 @@ export async function rotateAgentToken(id: string) {
 
   const agent = await prisma.agent.findUniqueOrThrow({
     where: { id },
-    select: { slug: true },
+    select: { slug: true, matrixUserId: true },
   });
   const password = crypto.randomBytes(24).toString("base64");
   await resetUserPassword(agent.slug, password);
@@ -313,6 +335,68 @@ export async function rotateAgentToken(id: string) {
       matrixDeviceId: login.device_id,
     },
   });
-  log.info({ slug: agent.slug, device: login.device_id }, "Token + device rotated");
+  log.info(
+    { slug: agent.slug, device: login.device_id },
+    "Token + device rotated",
+  );
+
+  // Profite du password frais pour (re)faire le cross-signing — best-effort.
+  // Si l'agent en avait déjà un, ses XS keys sont écrasées (upsert). Le
+  // device fraîchement obtenu sera signé une fois que le bot l'aura uploadé
+  // via /keys/upload (cf. signAgentDevice après bot start).
+  try {
+    await setupCrossSigningForAgent({
+      agentId: id,
+      userId: agent.matrixUserId,
+      localpart: agent.slug,
+      password,
+      accessToken: login.access_token,
+    });
+  } catch (e) {
+    log.warn(
+      { err: e, slug: agent.slug },
+      "Re-setup cross-signing échoué (token rotaté mais XS pas mises à jour)",
+    );
+  }
+
+  revalidatePath("/agents");
+}
+
+/**
+ * Signe le device courant de l'agent avec sa SSK déjà persistée. À appeler
+ * APRÈS que le bot Python ait démarré (et donc uploadé ses device_keys via
+ * matrix-nio). Si l'admin clique trop tôt, on renvoie une erreur explicite.
+ */
+export async function signAgentDeviceAction(id: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "agents.update");
+
+  const agent = await prisma.agent.findUniqueOrThrow({
+    where: { id },
+    select: {
+      slug: true,
+      matrixUserId: true,
+      matrixDeviceId: true,
+      matrixAccessToken: true,
+    },
+  });
+  if (!agent.matrixDeviceId || !agent.matrixAccessToken) {
+    throw new Error(
+      "L'agent n'a pas de device_id / access_token — rotate d'abord.",
+    );
+  }
+
+  await signAgentDevice({
+    agentId: id,
+    userId: agent.matrixUserId,
+    deviceId: agent.matrixDeviceId,
+    accessToken: decrypt(agent.matrixAccessToken),
+  });
+
+  log.info(
+    { slug: agent.slug, deviceId: agent.matrixDeviceId },
+    "Device signé manuellement par l'admin",
+  );
   revalidatePath("/agents");
 }
