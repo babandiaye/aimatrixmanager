@@ -3,6 +3,7 @@
 import { signIn } from "@/auth";
 import { AuthError } from "next-auth";
 import { z } from "zod";
+import { isEmergencyLocalLogin } from "@/lib/auth-config";
 
 const schema = z.object({
   email: z.string().email("Email invalide"),
@@ -11,10 +12,22 @@ const schema = z.object({
 
 export type LoginState = { error?: string } | undefined;
 
+/**
+ * Connexion locale — disponible uniquement si EMERGENCY_LOCAL_LOGIN=1.
+ * Le provider Credentials n'est sinon pas chargé côté NextAuth, donc cette
+ * action échouerait de toute façon — la garde ici donne un message clair.
+ */
 export async function loginWithCredentials(
   _prev: LoginState,
   formData: FormData,
 ): Promise<LoginState> {
+  if (!isEmergencyLocalLogin()) {
+    return {
+      error:
+        "La connexion locale est désactivée. Utilise Keycloak ou contacte un administrateur.",
+    };
+  }
+
   const parsed = schema.safeParse({
     email: formData.get("email"),
     password: formData.get("password"),
@@ -27,7 +40,7 @@ export async function loginWithCredentials(
     await signIn("credentials", {
       email: parsed.data.email,
       password: parsed.data.password,
-      redirectTo: "/",
+      redirectTo: "/dashboard",
     });
   } catch (e) {
     if (e instanceof AuthError) {
@@ -38,5 +51,5 @@ export async function loginWithCredentials(
 }
 
 export async function loginWithKeycloak() {
-  await signIn("keycloak", { redirectTo: "/" });
+  await signIn("keycloak", { redirectTo: "/dashboard" });
 }

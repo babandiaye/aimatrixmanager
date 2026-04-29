@@ -29,42 +29,52 @@ const ANTHROPIC_MODELS = [
   "claude-haiku-4-5",
 ] as const;
 
-const baseSchema = z
-  .object({
-    slug: z
-      .string()
-      .min(2, "2 caractères minimum")
-      .max(32, "32 caractères maximum")
-      .regex(
-        slugRe,
-        "Lettres minuscules, chiffres, tirets ; ne commence/finit pas par un tiret",
-      ),
-    name: z.string().min(2, "2 caractères minimum").max(100),
-    description: z
-      .string()
-      .max(2048)
-      .optional()
-      .transform((v) => v?.trim() || null),
-    systemPrompt: z.string().min(10, "Au moins 10 caractères").max(40000),
-    provider: z.enum(["ANTHROPIC", "OLLAMA"]),
-    model: z.string().min(1, "Modèle requis").max(100),
-    maxTokens: z.coerce.number().int().min(64).max(8192),
-    temperature: z.coerce
-      .number()
-      .min(0)
-      .max(1)
-      .optional()
-      .or(z.literal("").transform(() => undefined)),
-  })
-  .refine(
-    (data) =>
-      data.provider !== "ANTHROPIC" ||
-      (ANTHROPIC_MODELS as readonly string[]).includes(data.model),
+// Schéma base (objet pur — autorise .omit() / .pick() / .extend())
+const baseSchemaObject = z.object({
+  slug: z
+    .string()
+    .min(2, "2 caractères minimum")
+    .max(32, "32 caractères maximum")
+    .regex(
+      slugRe,
+      "Lettres minuscules, chiffres, tirets ; ne commence/finit pas par un tiret",
+    ),
+  name: z.string().min(2, "2 caractères minimum").max(100),
+  description: z
+    .string()
+    .max(2048)
+    .optional()
+    .transform((v) => v?.trim() || null),
+  systemPrompt: z.string().min(10, "Au moins 10 caractères").max(40000),
+  provider: z.enum(["ANTHROPIC", "OLLAMA"]),
+  model: z.string().min(1, "Modèle requis").max(100),
+  maxTokens: z.coerce.number().int().min(64).max(8192),
+  temperature: z.coerce
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
+});
+
+// Refine appliqué à part — couvre create et update (model valide pour le provider)
+function refineProviderModel<T extends z.ZodObject>(schema: T) {
+  return schema.refine(
+    (data: unknown) => {
+      const d = data as { provider: string; model: string };
+      return (
+        d.provider !== "ANTHROPIC" ||
+        (ANTHROPIC_MODELS as readonly string[]).includes(d.model)
+      );
+    },
     {
       path: ["model"],
       message: "Modèle Anthropic invalide",
     },
   );
+}
+
+const baseSchema = refineProviderModel(baseSchemaObject);
 
 export type AgentFormState =
   | { error?: string; fieldErrors?: Record<string, string[]> }
@@ -177,7 +187,9 @@ export async function updateAgent(
   assertCan(session.user.role, "agents.update");
 
   // À l'édition, le slug n'est pas modifiable (le MXID Matrix est figé)
-  const parsed = baseSchema.omit({ slug: true }).safeParse({
+  // → on omit() sur l'objet pur (sans refine) puis on réapplique le refine
+  const updateSchema = refineProviderModel(baseSchemaObject.omit({ slug: true }));
+  const parsed = updateSchema.safeParse({
     ...getFormData(formData),
     slug: undefined,
   });

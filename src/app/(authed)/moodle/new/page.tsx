@@ -23,7 +23,7 @@ export default async function NewPlatformPage() {
         </h1>
         <p className="text-muted-foreground">
           Renseigne l&apos;URL et le token Web Services pour permettre à
-          aibotmanager d&apos;y accéder.
+          AI Bot Manager d&apos;y accéder.
         </p>
       </div>
 

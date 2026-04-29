@@ -10,7 +10,6 @@ import {
   CpuChipIcon,
   ChatBubbleLeftRightIcon,
   AcademicCapIcon,
-  ClipboardDocumentListIcon,
   UserGroupIcon,
   Cog6ToothIcon,
 } from "@heroicons/react/24/outline";
@@ -24,11 +23,10 @@ type NavItem = {
 };
 
 const NAV: NavItem[] = [
-  { href: "/", label: "Tableau de bord", icon: ChartBarIcon },
+  { href: "/dashboard", label: "Tableau de bord", icon: ChartBarIcon },
   { href: "/agents", label: "Agents", icon: CpuChipIcon, requires: "agents.view" },
   { href: "/rooms", label: "Salons", icon: ChatBubbleLeftRightIcon, requires: "rooms.view" },
   { href: "/moodle", label: "Plateformes Moodle", icon: AcademicCapIcon, requires: "moodle.view" },
-  { href: "/audit", label: "Audit", icon: ClipboardDocumentListIcon, requires: "audit.view" },
   { href: "/users", label: "Utilisateurs", icon: UserGroupIcon, requires: "users.manage" },
   { href: "/settings", label: "Paramètres", icon: Cog6ToothIcon, requires: "settings.manage" },
 ];
@@ -39,22 +37,26 @@ export function Sidebar({ role }: { role: UserRole }) {
 
   return (
     <aside className="w-52 shrink-0 border-r border-sidebar-border bg-sidebar">
-      <div className="flex h-16 flex-col items-start justify-center gap-0.5 border-b border-sidebar-border px-4">
+      <Link
+        href="/"
+        className="flex h-16 flex-col items-start justify-center gap-0.5 border-b border-sidebar-border px-4 transition-colors hover:bg-muted/30"
+        title="Accueil AI Bot Manager"
+      >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/logo-unchk.png"
           alt="UN-CHK"
           className="h-8 w-auto"
         />
-        <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-          aibotmanager
+        <span className="text-[10px] font-medium tracking-wider text-muted-foreground">
+          AI Bot Manager
         </span>
-      </div>
+      </Link>
       <nav className="p-2">
         {items.map((item) => {
           const active =
-            item.href === "/"
-              ? pathname === "/"
+            item.href === "/dashboard"
+              ? pathname === "/dashboard"
               : pathname.startsWith(item.href);
           return (
             <Link

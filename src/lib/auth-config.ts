@@ -1,10 +1,7 @@
-import { prisma } from "@/lib/prisma";
-
-export const SETTINGS_ID = "global";
-
 /**
- * Keycloak est-il configuré dans .env (kill switch) ?
- * Si l'une des 3 vars est manquante, Keycloak est invisible partout.
+ * Keycloak est-il configuré dans .env ?
+ * Si l'une des 3 vars manque, le provider n'est pas ajouté du tout — la page
+ * de login bascule alors automatiquement sur le mode urgence.
  */
 export function isKeycloakConfigured(): boolean {
   return Boolean(
@@ -15,18 +12,10 @@ export function isKeycloakConfigured(): boolean {
 }
 
 /**
- * Keycloak est-il actif (env + setting DB) ?
- * - env vide → false (kill switch)
- * - env set + setting DB true → true
- * - env set + setting DB false → false
+ * Mode urgence : Credentials provider activé. Désactivé par défaut.
+ * À n'activer que si Keycloak est down ou cassé : `EMERGENCY_LOCAL_LOGIN=1`
+ * dans .env puis redémarrage du service.
  */
-export async function isKeycloakActive(): Promise<boolean> {
-  if (!isKeycloakConfigured()) return false;
-  const settings = await prisma.systemSettings.upsert({
-    where: { id: SETTINGS_ID },
-    update: {},
-    create: { id: SETTINGS_ID, keycloakEnabled: true },
-    select: { keycloakEnabled: true },
-  });
-  return settings.keycloakEnabled;
+export function isEmergencyLocalLogin(): boolean {
+  return process.env.EMERGENCY_LOCAL_LOGIN === "1";
 }

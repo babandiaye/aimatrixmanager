@@ -2,7 +2,6 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import bcrypt from "bcryptjs";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertCan } from "@/lib/permissions";
@@ -44,38 +43,6 @@ export async function updateUserRole(userId: string, role: string) {
   await prisma.user.update({
     where: { id: userId },
     data: { role: parsed.data },
-  });
-  revalidatePath("/users");
-}
-
-/**
- * Réinitialise le mot de passe d'un utilisateur LOCAL (admin uniquement).
- * Refuse les comptes Keycloak — leur mot de passe est géré par Keycloak.
- */
-export async function resetUserPassword(userId: string, newPassword: string) {
-  const session = await auth();
-  if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "users.manage");
-
-  if (!newPassword || newPassword.length < 8) {
-    throw new Error("Mot de passe : minimum 8 caractères");
-  }
-
-  const target = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, email: true, passwordHash: true },
-  });
-  if (!target) throw new Error("Utilisateur introuvable");
-  if (!target.passwordHash) {
-    throw new Error(
-      "Compte Keycloak — le mot de passe est géré par Keycloak, pas par aibotmanager.",
-    );
-  }
-
-  const passwordHash = await bcrypt.hash(newPassword, 12);
-  await prisma.user.update({
-    where: { id: userId },
-    data: { passwordHash },
   });
   revalidatePath("/users");
 }

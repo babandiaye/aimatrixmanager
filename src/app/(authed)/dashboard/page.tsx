@@ -15,28 +15,14 @@ import {
   ChatBubbleLeftRightIcon,
   AcademicCapIcon,
   BookOpenIcon,
-  ChartBarIcon,
-  BoltIcon,
   ExclamationTriangleIcon,
-  ClockIcon,
   CheckCircleIcon,
   XCircleIcon,
 } from "@heroicons/react/24/outline";
 
-const HOURS_24 = 24 * 60 * 60 * 1000;
-
-function fmtNumber(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "—";
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
 export default async function DashboardPage() {
   const session = await auth();
   if (!session?.user) return null;
-
-  const since = new Date(Date.now() - HOURS_24);
 
   const [
     agentTotal,
@@ -45,9 +31,6 @@ export default async function DashboardPage() {
     assignmentActive,
     platformActive,
     courseTotal,
-    msgs24,
-    errors24,
-    tokens24,
     health,
   ] = await Promise.all([
     prisma.agent.count(),
@@ -56,15 +39,6 @@ export default async function DashboardPage() {
     prisma.roomAgent.count({ where: { enabled: true } }),
     prisma.moodlePlatform.count({ where: { enabled: true } }),
     prisma.moodleCourse.count(),
-    prisma.auditLog.count({ where: { createdAt: { gte: since } } }),
-    prisma.auditLog.count({
-      where: { createdAt: { gte: since }, error: { not: null } },
-    }),
-    prisma.auditLog.aggregate({
-      where: { createdAt: { gte: since } },
-      _sum: { inputTokens: true, outputTokens: true },
-      _avg: { latencyMs: true },
-    }),
     getSystemHealth(),
   ]);
 
@@ -111,47 +85,6 @@ export default async function DashboardPage() {
           href="/moodle"
         />
       </div>
-
-      {/* Activité 24h */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Activité — dernières 24 h</CardTitle>
-          <CardDescription>
-            Messages traités par les agents IA, coût et latence.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-4 md:grid-cols-4">
-            <Stat
-              icon={ChartBarIcon}
-              label="Messages"
-              value={fmtNumber(msgs24)}
-            />
-            <Stat
-              icon={BoltIcon}
-              label="Tokens (in/out)"
-              value={`${fmtNumber(tokens24._sum.inputTokens)}/${fmtNumber(
-                tokens24._sum.outputTokens,
-              )}`}
-            />
-            <Stat
-              icon={ClockIcon}
-              label="Latence moyenne"
-              value={
-                tokens24._avg.latencyMs
-                  ? `${Math.round(tokens24._avg.latencyMs)} ms`
-                  : "—"
-              }
-            />
-            <Stat
-              icon={ExclamationTriangleIcon}
-              label="Erreurs"
-              value={String(errors24)}
-              tone={errors24 > 0 ? "error" : "ok"}
-            />
-          </div>
-        </CardContent>
-      </Card>
 
       {/* État des services */}
       <Card>
@@ -219,8 +152,6 @@ function HealthRow({ item }: { item: HealthItem }) {
   );
 }
 
-// ─── Sous-composants locaux ─────────────────────────────────────────────
-
 function KpiCard({
   icon: Icon,
   label,
@@ -253,43 +184,5 @@ function KpiCard({
         </CardContent>
       </Card>
     </Link>
-  );
-}
-
-function Stat({
-  icon: Icon,
-  label,
-  value,
-  tone,
-}: {
-  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
-  label: string;
-  value: string;
-  tone?: "ok" | "error";
-}) {
-  return (
-    <div className="flex items-center gap-3">
-      <div
-        className={
-          tone === "error"
-            ? "rounded-lg bg-status-error/10 p-2"
-            : "rounded-lg bg-muted p-2"
-        }
-      >
-        <Icon
-          className={
-            tone === "error"
-              ? "size-5 text-status-error"
-              : "size-5 text-muted-foreground"
-          }
-        />
-      </div>
-      <div>
-        <div className="text-xs uppercase tracking-wider text-muted-foreground">
-          {label}
-        </div>
-        <div className="text-lg font-semibold text-foreground">{value}</div>
-      </div>
-    </div>
   );
 }

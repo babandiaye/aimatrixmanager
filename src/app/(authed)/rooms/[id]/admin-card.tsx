@@ -44,7 +44,7 @@ export function AdminCard({
       <CardHeader>
         <CardTitle>Administration</CardTitle>
         <CardDescription>
-          Gestion du salon depuis aibotmanager — change le nom ou active le
+          Gestion du salon depuis AI Bot Manager — change le nom ou active le
           chiffrement E2EE.
         </CardDescription>
       </CardHeader>

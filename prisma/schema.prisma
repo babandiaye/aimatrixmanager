@@ -33,10 +33,9 @@ enum LLMProvider {
 // ─── Settings système (singleton, id="global") ───────────────────────────────
 
 model SystemSettings {
-  id              String   @id @default("global")
-  keycloakEnabled Boolean  @default(true)
-  updatedAt       DateTime @updatedAt
-  updatedById     String?
+  id          String   @id @default("global")
+  updatedAt   DateTime @updatedAt
+  updatedById String?
 }
 
 // ─── Auth / Admin users ───────────────────────────────────────────────────────

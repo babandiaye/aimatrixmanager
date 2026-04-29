@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "aibotmanager",
+  title: "AI Bot Manager",
   description: "Gestion d'agents IA pour Matrix/Synapse",
 };
 

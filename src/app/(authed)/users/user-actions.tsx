@@ -12,24 +12,17 @@ import {
 import { TrashIcon } from "@heroicons/react/24/outline";
 import type { UserRole } from "@prisma/client";
 import { deleteUser, updateUserRole } from "./actions";
-import { PasswordResetDialog } from "./password-reset-dialog";
 
 export function UserActions({
   userId,
   currentRole,
   isSelf,
   isLastAdmin,
-  isLocal,
-  email,
-  name,
 }: {
   userId: string;
   currentRole: UserRole;
   isSelf: boolean;
   isLastAdmin: boolean;
-  isLocal: boolean;
-  email: string;
-  name: string | null;
 }) {
   const [pending, start] = useTransition();
 
@@ -63,10 +56,6 @@ export function UserActions({
           <SelectItem value="AUDITOR">AUDITOR</SelectItem>
         </SelectContent>
       </Select>
-
-      {isLocal && (
-        <PasswordResetDialog userId={userId} email={email} name={name} />
-      )}
 
       <Button
         type="button"

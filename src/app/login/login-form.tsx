@@ -11,9 +11,22 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { loginWithCredentials, loginWithKeycloak } from "./actions";
+import { ExclamationTriangleIcon } from "@heroicons/react/24/outline";
+import { loginWithCredentials } from "./actions";
 
-export function LoginForm({ keycloakActive }: { keycloakActive: boolean }) {
+/**
+ * Formulaire local — affiché uniquement si Keycloak n'est pas configuré
+ * OU si on est en mode urgence (EMERGENCY_LOCAL_LOGIN=1) avec ?manual=1.
+ */
+export function LoginForm({
+  emergency,
+  keycloakConfigured,
+  error: ssoError,
+}: {
+  emergency: boolean;
+  keycloakConfigured: boolean;
+  error?: string;
+}) {
   const [state, formAction, pending] = useActionState(
     loginWithCredentials,
     undefined,
@@ -22,28 +35,30 @@ export function LoginForm({ keycloakActive }: { keycloakActive: boolean }) {
   return (
     <Card className="w-full max-w-sm">
       <CardHeader className="space-y-1">
-        <CardTitle className="text-2xl">aibotmanager</CardTitle>
-        <CardDescription>Connecte-toi pour gérer tes agents.</CardDescription>
+        <CardTitle className="text-2xl">AI Bot Manager</CardTitle>
+        <CardDescription>
+          {emergency
+            ? "Mode urgence — connexion locale activée"
+            : "Connexion locale (Keycloak non configuré)"}
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {keycloakActive && (
-          <>
-            <form action={loginWithKeycloak}>
-              <Button type="submit" className="w-full" size="lg">
-                Se connecter avec Keycloak UNCHK
-              </Button>
-            </form>
-            <div className="relative py-2">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-card px-2 text-muted-foreground">
-                  ou en local
-                </span>
-              </div>
-            </div>
-          </>
+        {emergency && (
+          <div className="flex items-start gap-2 rounded-lg border border-status-unpublished/30 bg-status-unpublished/5 p-3 text-xs">
+            <ExclamationTriangleIcon className="size-4 shrink-0 text-status-unpublished" />
+            <p>
+              <strong>EMERGENCY_LOCAL_LOGIN actif.</strong> À désactiver dès que
+              Keycloak est rétabli (retirer la var de <code>.env</code> et
+              redémarrer).
+            </p>
+          </div>
+        )}
+
+        {ssoError && (
+          <div className="rounded-lg bg-status-error/10 p-3 text-sm text-status-error">
+            Échec de la connexion SSO ({ssoError}). Réessaie ou contacte un
+            administrateur.
+          </div>
         )}
 
         <form action={formAction} className="space-y-4">
@@ -71,15 +86,18 @@ export function LoginForm({ keycloakActive }: { keycloakActive: boolean }) {
           {state?.error && (
             <p className="text-sm text-destructive">{state.error}</p>
           )}
-          <Button
-            type="submit"
-            variant={keycloakActive ? "outline" : "default"}
-            className="w-full"
-            disabled={pending}
-          >
+          <Button type="submit" className="w-full" disabled={pending}>
             {pending ? "Connexion..." : "Se connecter"}
           </Button>
         </form>
+
+        {keycloakConfigured && emergency && (
+          <p className="text-center text-xs text-muted-foreground">
+            <a href="/login" className="text-primary hover:underline">
+              ← Revenir à la connexion Keycloak
+            </a>
+          </p>
+        )}
       </CardContent>
     </Card>
   );

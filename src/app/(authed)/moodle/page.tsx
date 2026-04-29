@@ -45,7 +45,7 @@ export default async function MoodlePlatformsPage() {
             Plateformes Moodle
           </h1>
           <p className="text-muted-foreground">
-            Instances Moodle reliées à aibotmanager (DISI, P11STN…).
+            Instances Moodle reliées à AI Bot Manager (DISI, P11STN…).
           </p>
         </div>
         {canCreate && (

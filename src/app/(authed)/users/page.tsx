@@ -41,7 +41,7 @@ export default async function UsersPage() {
           Utilisateurs
         </h1>
         <p className="text-muted-foreground">
-          Comptes ayant accès à aibotmanager.
+          Comptes ayant accès à AI Bot Manager.
         </p>
       </div>
 
@@ -72,7 +72,7 @@ export default async function UsersPage() {
                 const providers = u.accounts.length
                   ? u.accounts.map((a) => a.provider).join(", ")
                   : u.passwordHash
-                    ? "Local"
+                    ? "Local (urgence)"
                     : "—";
                 return (
                   <TableRow key={u.id}>
@@ -110,9 +110,6 @@ export default async function UsersPage() {
                         currentRole={u.role}
                         isSelf={isSelf}
                         isLastAdmin={isLastAdmin}
-                        isLocal={Boolean(u.passwordHash)}
-                        email={u.email}
-                        name={u.name}
                       />
                     </TableCell>
                   </TableRow>

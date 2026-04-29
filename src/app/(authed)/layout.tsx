@@ -1,9 +1,10 @@
 import { redirect } from "next/navigation";
-import { auth, signOut } from "@/auth";
+import { auth } from "@/auth";
 import { Sidebar } from "@/components/sidebar";
 import { Footer } from "@/components/footer";
 import { Button } from "@/components/ui/button";
 import { ArrowLeftStartOnRectangleIcon } from "@heroicons/react/24/outline";
+import { logoutCompletely } from "./logout-action";
 
 export default async function AuthedLayout({
   children,
@@ -29,12 +30,7 @@ export default async function AuthedLayout({
               )}
             </div>
           </div>
-          <form
-            action={async () => {
-              "use server";
-              await signOut({ redirectTo: "/login" });
-            }}
-          >
+          <form action={logoutCompletely}>
             <Button type="submit" variant="destructive" size="sm">
               <ArrowLeftStartOnRectangleIcon className="size-4" />
               Déconnexion
