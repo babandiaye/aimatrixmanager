@@ -43,6 +43,12 @@ export default async function RoomDetailPage({
   });
   if (!room) notFound();
 
+  // Non-ADMIN : ne voit que les salons provenant de Moodle. On répond 404
+  // (pas 403) pour ne pas révéler l'existence des salons natifs.
+  if (session.user.role !== "ADMIN" && room.source !== "MOODLE") {
+    notFound();
+  }
+
   // Listes pour les selectors
   const allAgents = await prisma.agent.findMany({
     where: { status: { not: "SUSPENDED" } },

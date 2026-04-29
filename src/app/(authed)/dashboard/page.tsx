@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { roomScopeFor } from "@/lib/permissions";
 import { getSystemHealth, type HealthItem } from "@/lib/health";
 import {
   Card,
@@ -24,6 +25,7 @@ export default async function DashboardPage() {
   const session = await auth();
   if (!session?.user) return null;
 
+  const scope = roomScopeFor(session.user.role);
   const [
     agentTotal,
     agentEnabled,
@@ -35,8 +37,10 @@ export default async function DashboardPage() {
   ] = await Promise.all([
     prisma.agent.count(),
     prisma.agent.count({ where: { status: "ENABLED" } }),
-    prisma.room.count(),
-    prisma.roomAgent.count({ where: { enabled: true } }),
+    prisma.room.count({ where: scope }),
+    prisma.roomAgent.count({
+      where: { enabled: true, room: scope },
+    }),
     prisma.moodlePlatform.count({ where: { enabled: true } }),
     prisma.moodleCourse.count(),
     getSystemHealth(),

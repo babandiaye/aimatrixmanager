@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
-import { can } from "@/lib/permissions";
+import { can, roomScopeFor } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import {
   Card,
@@ -45,9 +45,11 @@ export default async function RoomsPage({
   const sp = await searchParams;
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
+  const scope = roomScopeFor(session.user.role);
   const [total, rooms] = await Promise.all([
-    prisma.room.count(),
+    prisma.room.count({ where: scope }),
     prisma.room.findMany({
+      where: scope,
       orderBy: { discoveredAt: "desc" },
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,

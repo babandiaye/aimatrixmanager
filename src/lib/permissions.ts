@@ -54,3 +54,14 @@ export function assertCan(role: UserRole, perm: Permission): void {
     throw new Error(`Forbidden: rôle ${role} n'a pas la permission ${perm}`);
   }
 }
+
+/**
+ * Filtre Prisma à appliquer sur la table Room selon le rôle.
+ * Seul ADMIN voit tous les salons. Les autres rôles ne voient que les salons
+ * provenant de Moodle (créés via le plugin mod_matrix), pas ceux créés
+ * nativement depuis un client Matrix (Element, formation1-chat.unchk.sn…).
+ */
+export function roomScopeFor(role: UserRole) {
+  if (role === "ADMIN") return {};
+  return { source: "MOODLE" } as const;
+}
