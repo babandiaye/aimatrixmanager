@@ -30,6 +30,14 @@ enum LLMProvider {
   OLLAMA
 }
 
+// Origine d'un salon Matrix :
+//  - MATRIX : créé nativement (Element, formation1-chat.unchk.sn, autre client)
+//  - MOODLE : provisionné via le plugin mod_matrix d'un cours Moodle
+enum RoomSource {
+  MATRIX
+  MOODLE
+}
+
 // ─── Settings système (singleton, id="global") ───────────────────────────────
 
 model SystemSettings {
@@ -149,9 +157,39 @@ model MoodlePlatform {
   updatedAt   DateTime @updatedAt
   createdById String?
 
-  courses MoodleCourse[]
+  courses           MoodleCourse[]
+  matrixActivities  MoodleMatrixActivity[]
 
   @@index([enabled])
+}
+
+// ─── Activités mod_matrix découvertes côté Moodle ─────────────────────────────
+// Chaque ligne = une instance du plugin mod_matrix dans un cours Moodle.
+// Source : WS mod_matrix_get_matrices_by_courses (Moodle plugin Famedly).
+
+model MoodleMatrixActivity {
+  id              String   @id @default(cuid())
+  platformId      String
+  platform        MoodlePlatform @relation(fields: [platformId], references: [id], onDelete: Cascade)
+  moodleId        Int      // id de l'instance mod_matrix côté Moodle
+  courseModuleId  Int      // cmid — pour deep-link `/mod/matrix/view.php?id=<cmid>`
+  moodleCourseId  Int      // course id Moodle (pour join avec MoodleCourse.moodleId)
+  courseShortname String
+  courseFullname  String
+  name            String   // nom de l'activité (visible dans Moodle)
+  topic           String?
+  target          String?  // ex: "element-url"
+  section         Int?
+  // Tableau des rooms (1 par groupe Moodle) — `[{matrix_room_id, group_id, timecreated}]`
+  // Conservé en JSON pour éviter la table 1-N tant qu'on n'en a pas l'usage.
+  rooms           Json
+  timecreated     DateTime
+  timemodified    DateTime?
+  lastSyncedAt    DateTime @default(now())
+
+  @@unique([platformId, moodleId])
+  @@index([platformId])
+  @@index([platformId, moodleCourseId])
 }
 
 // ─── Cours Moodle (synchronisés) ──────────────────────────────────────────────
@@ -182,6 +220,9 @@ model Room {
   topic         String?
   isDirect      Boolean  @default(false) // DM si <= 2 membres
   isEncrypted   Boolean  @default(false)
+  // Origine : MATRIX par défaut. Passe à MOODLE quand le sync mod_matrix
+  // détecte que ce matrix_room_id provient d'une activité du plugin Moodle.
+  source        RoomSource @default(MATRIX)
 
   moodleCourseId String?
   moodleCourse   MoodleCourse? @relation(fields: [moodleCourseId], references: [id], onDelete: SetNull)

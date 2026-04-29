@@ -34,7 +34,9 @@ export default async function MoodlePlatformsPage() {
 
   const platforms = await prisma.moodlePlatform.findMany({
     orderBy: { createdAt: "asc" },
-    include: { _count: { select: { courses: true } } },
+    include: {
+      _count: { select: { courses: true, matrixActivities: true } },
+    },
   });
 
   return (
@@ -84,6 +86,7 @@ export default async function MoodlePlatformsPage() {
                   <TableHead>Nom</TableHead>
                   <TableHead>URL</TableHead>
                   <TableHead>Cours</TableHead>
+                  <TableHead>Activités Matrix</TableHead>
                   <TableHead>État</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -107,6 +110,23 @@ export default async function MoodlePlatformsPage() {
                     </TableCell>
                     <TableCell className="text-sm">
                       {p._count.courses}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {p._count.matrixActivities > 0 ? (
+                        <Link
+                          href={`/moodle/${p.id}/activities`}
+                          className="text-primary hover:underline"
+                        >
+                          {p._count.matrixActivities}
+                        </Link>
+                      ) : (
+                        <Link
+                          href={`/moodle/${p.id}/activities`}
+                          className="text-muted-foreground hover:text-foreground hover:underline"
+                        >
+                          0
+                        </Link>
+                      )}
                     </TableCell>
                     <TableCell>
                       <StatusBadge

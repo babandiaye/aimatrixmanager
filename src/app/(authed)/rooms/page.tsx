@@ -21,7 +21,12 @@ import {
 import { buttonVariants } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Pagination } from "@/components/ui/pagination";
-import { LockClosedIcon, UsersIcon } from "@heroicons/react/24/outline";
+import {
+  LockClosedIcon,
+  UsersIcon,
+  AcademicCapIcon,
+  ChatBubbleLeftRightIcon,
+} from "@heroicons/react/24/outline";
 import { SyncRoomsButton } from "./sync-rooms-button";
 
 const PAGE_SIZE = 20;
@@ -98,6 +103,7 @@ export default async function RoomsPage({
               <TableHeader>
                 <TableRow>
                   <TableHead>Nom</TableHead>
+                  <TableHead>Source</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Membres</TableHead>
                   <TableHead>Agents</TableHead>
@@ -119,6 +125,25 @@ export default async function RoomsPage({
                       <div className="font-mono text-[10px] text-muted-foreground">
                         {r.matrixRoomId}
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      {r.source === "MOODLE" ? (
+                        <span
+                          className="inline-flex items-center gap-1 text-xs text-status-published"
+                          title="Provisionné via le plugin mod_matrix Moodle"
+                        >
+                          <AcademicCapIcon className="size-3.5" />
+                          Moodle
+                        </span>
+                      ) : (
+                        <span
+                          className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                          title="Créé nativement (Element, formation1-chat.unchk.sn…)"
+                        >
+                          <ChatBubbleLeftRightIcon className="size-3.5" />
+                          Chat
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1.5 text-xs">

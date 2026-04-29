@@ -54,3 +54,46 @@ export async function listCourses(
   );
   return r.courses;
 }
+
+export type MoodleMatrixRoomDTO = {
+  matrix_room_id: string;
+  group_id: number | null;
+  timecreated: number;
+};
+
+export type MoodleMatrixActivityDTO = {
+  id: number;
+  coursemodule: number;
+  course: number;
+  course_shortname: string;
+  course_fullname: string;
+  name: string;
+  topic: string | null;
+  target: string | null;
+  section: number | null;
+  timecreated: number;
+  timemodified: number;
+  rooms: MoodleMatrixRoomDTO[];
+};
+
+/**
+ * Liste les activités du plugin mod_matrix (Famedly) sur la plateforme.
+ * Si `courseIds` est fourni, restreint à ces cours — sinon retourne tous
+ * les cours visibles par le token (en pratique, scope du compte service).
+ */
+export async function listMatrixActivities(
+  platform: Pick<MoodlePlatform, "baseUrl" | "wsToken">,
+  courseIds?: number[],
+): Promise<MoodleMatrixActivityDTO[]> {
+  const params: Record<string, string> = {};
+  if (courseIds?.length) {
+    courseIds.forEach((id, i) => {
+      params[`courseids[${i}]`] = String(id);
+    });
+  }
+  const r = await callMoodleWS<{
+    matrices: MoodleMatrixActivityDTO[];
+    warnings: unknown[];
+  }>(platform, "mod_matrix_get_matrices_by_courses", params);
+  return r.matrices;
+}
