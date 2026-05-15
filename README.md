@@ -11,6 +11,7 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 - [Architecture](#architecture)
 - [Stack technique](#stack-technique)
 - [Prérequis](#prérequis)
+  - [Moodle — service Web Services](#moodle--service-web-services)
 - [Installation](#installation)
 - [Configuration `.env`](#configuration-env)
 - [Lancer en développement](#lancer-en-développement)
@@ -95,16 +96,47 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 ### Services externes
 - **Synapse / Matrix** déployé et joignable en HTTP local
 - **Compte Synapse admin** avec un access token dédié (utilisé pour provisionner les agents)
-- **Moodle 4.x** avec **Web Services** activés et un service externe créé pour aibotmanager (au moins ces fonctions WS) :
-  - `core_webservice_get_site_info`
-  - `core_course_get_courses_by_field`
-  - `core_course_get_contents`
-  - `core_course_get_categories`
-  - `mod_resource_get_resources_by_courses`
-  - `mod_page_get_pages_by_courses`
-  - `mod_url_get_urls_by_courses`
+- **Moodle 4.x** avec **Web Services activés** et un **service externe** créé pour aibotmanager (cf. section [Moodle — service Web Services](#moodle--service-web-services) plus bas)
+- **Plugin [`mod_matrix` (Famedly)](https://github.com/element-hq/moodle-mod_matrix)** installé sur chaque Moodle, si on veut détecter les activités Matrix créées depuis les cours
 - **Clé API Anthropic** (`ANTHROPIC_API_KEY`)
+- **Serveur d'embeddings** compatible OpenAI servant un modèle (recommandé : `nomic-embed-text` 768-dim sur Ollama avec GPU)
 - **Realm Keycloak** (optionnel) avec un client OIDC dont le `redirect URI` pointe vers `<base-url>/api/auth/callback/keycloak`
+
+### Moodle — service Web Services
+
+aibotmanager interroge chaque Moodle via un **service externe dédié** (par exemple `BBBmanager`) avec un compte service (rôle Manager au niveau site). Crée le service dans *Site administration → Server → Web services → External services → Add*.
+
+**Réglages du service :**
+
+| Option | Valeur | Pourquoi |
+|---|---|---|
+| Enabled | ✅ | Indispensable |
+| Authorized users only | ✅ | Limite à un compte service dédié |
+| Can download files | ✅ | Requis pour extraire les PDF/DOCX dans le RAG (sinon `accessexception` au téléchargement) |
+| Can upload files | ❌ | Non utilisé |
+
+**Fonctions à ajouter** (onglet *Functions*) :
+
+| Fonction WS | Où c'est utilisé | Obligatoire ? |
+|---|---|:---:|
+| `core_course_get_courses_by_field` | Sync des cours d'une plateforme (`/moodle/[id]` → bouton 🔄) | ✅ |
+| `core_course_get_contents` | Sync structurel d'un cours (sections + modules) pour le RAG | ✅ |
+| `core_user_get_users_by_field` | Résolution rôle ENSEIGNANT : retrouver l'user Moodle à partir de son email Keycloak | ✅ (si ENSEIGNANT activé) |
+| `core_enrol_get_users_courses` | Liste des cours où l'utilisateur est inscrit | ✅ (si ENSEIGNANT activé) |
+| `core_enrol_get_enrolled_users` | Lecture des rôles Moodle dans un cours (filtre `editingteacher`/`teacher`) | ✅ (si ENSEIGNANT activé) |
+| `mod_matrix_get_matrices_by_courses` | Sync des activités Matrix (mod_matrix Famedly) → lien Room ↔ Cours | ✅ (si mod_matrix utilisé) |
+
+> ℹ️ Sans `mod_matrix_get_matrices_by_courses`, les rooms créées depuis Moodle resteront en `source=MATRIX` (non liées au cours) et l'ENSEIGNANT ne les verra pas dans `/mes-cours` ni dans `/rooms`.
+
+> ℹ️ Sans les 3 fonctions `core_user_*` et `core_enrol_*`, le rôle **ENSEIGNANT** ne fonctionnera pas — la résolution des cours où l'utilisateur est prof se fera silencieusement vide (`/mes-cours` affichera "Aucun cours trouvé").
+
+**Génération du token :** *Site administration → Server → Web services → Manage tokens → Create token*, en sélectionnant le service `BBBmanager` et le compte service. Reporte la valeur dans l'UI `/moodle/new` (le token est chiffré AES-256-GCM en DB).
+
+**Vérification rapide** depuis le serveur :
+
+```bash
+pnpm exec tsx scripts/test-moodle-functions.ts   # liste toutes les fonctions autorisées par le token
+```
 
 ---
 
@@ -365,14 +397,30 @@ Phase suivante envisagée : un signal SIGHUP ou un canal Redis pub/sub pour reco
 ```
 1. Login (Keycloak ou local)
 2. /moodle → ajouter une plateforme (clé + URL + token WS)
-3. /moodle → bouton 🔄 → synchronise les cours dans MoodleCourse
-4. /agents → créer un nouvel agent (slug, prompt, modèle)
-5. /agents → passer le statut à ENABLED
-6. /rooms → bouton « Synchroniser depuis Synapse »
-7. /rooms/[id] → assigner l'agent + lier au cours Moodle
-8. Redémarrer le bot Python : sudo docker restart bot-ia
-9. Élève écrit `@<slug> bonjour ...` dans Element → l'agent répond
-10. /audit → contrôle pédagogique des conversations
+   → cf. section Moodle — service Web Services pour les fonctions à activer
+3. /moodle → bouton 🔄 → sync des cours dans MoodleCourse
+4. /moodle/[id]/activities → bouton Synchroniser
+   → importe les MoodleMatrixActivity + lie les Room ↔ MoodleCourse
+5. /rooms → bouton « Synchroniser depuis Synapse » (découvre toutes les rooms)
+6. /agents → créer un agent (slug, prompt, modèle) → ENABLED
+7. /rooms/[id] → assigner l'agent + lier au cours Moodle si non auto-lié
+8. /rooms/[id] → activer l'indexation RAG (Phase 11)
+9. Redémarrer le bot Python : sudo docker restart bot-ia
+10. Élève écrit `@<slug> bonjour ...` dans Element → l'agent répond
+11. /audit → contrôle pédagogique des conversations
+```
+
+### Flow ENSEIGNANT (auto-service)
+
+```
+1. Admin promeut l'utilisateur ENSEIGNANT dans /users
+2. L'ENSEIGNANT se connecte (Keycloak — son email doit matcher son compte Moodle)
+3. /mes-cours → résolution auto via WS (cache 1h)
+   → liste les cours où il est editingteacher/teacher
+4. /agents/new → crée son propre agent IA (slug, prompt, modèle)
+5. /rooms → voit uniquement les salons Moodle de ses cours
+6. /rooms/[id] → assigne son agent au salon (sélecteur scopé à ses agents)
+7. Le bot répond aux mentions dans le salon une fois redémarré
 ```
 
 ### Cycle de mise à jour code
@@ -393,38 +441,73 @@ cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
 
 ## Schéma de la base de données
 
-11 tables :
+17 tables (voir [`prisma/schema.prisma`](prisma/schema.prisma)) :
+
+**Auth / utilisateurs**
 
 | Table | Rôle |
 |---|---|
-| `User` | Comptes admins/managers/auditors de la plateforme |
+| `User` | Comptes ADMIN/MANAGER/ENSEIGNANT/AUDITOR + `moodleUserMap` (cache résolution prof) |
 | `Account` `Session` `VerificationToken` | NextAuth (OIDC liaison) |
+| `AuthAuditLog` | Journal des logins (success/fail, provider, IP) |
 | `SystemSettings` | Config runtime (toggle Keycloak) |
-| `Agent` | Bots IA (slug, MXID, prompt, modèle, statut, accessToken chiffré) |
-| `MoodlePlatform` | Instances Moodle (clé, URL, wsToken chiffré) |
-| `MoodleCourse` | Cours synchronisés depuis Moodle |
-| `Room` | Salons Matrix découverts (lié optionnellement à un cours) |
-| `RoomAgent` | Affectation salon ↔ agent |
-| `AuditLog` | Conversation : sender, message, réponse, tokens, latence |
-| `KnowledgeChunk` | Chunks RAG (`vector(1536)` pgvector, scope agent + room) |
 
-Voir [`prisma/schema.prisma`](prisma/schema.prisma).
+**Agents IA Matrix**
+
+| Table | Rôle |
+|---|---|
+| `Agent` | Bots IA (slug, MXID, prompt, modèle, statut, `matrixAccessToken` chiffré, `createdById`) |
+| `AgentCrossSigning` | Clés Ed25519 master/SSK/USK pour le cross-signing E2EE |
+
+**Moodle**
+
+| Table | Rôle |
+|---|---|
+| `MoodlePlatform` | Instances Moodle (clé, URL, `wsToken` chiffré) |
+| `MoodleCourse` | Cours synchronisés depuis Moodle (`reindexEnabled` pour RAG) |
+| `MoodleMatrixActivity` | Activités du plugin `mod_matrix` (Famedly) — sync via `mod_matrix_get_matrices_by_courses` |
+
+**Salons Matrix**
+
+| Table | Rôle |
+|---|---|
+| `Room` | Salons Matrix découverts (`source` = MATRIX ou MOODLE, lien optionnel à un `MoodleCourse`) |
+| `RoomAgent` | Affectation salon ↔ agent (`enabled` togglable) |
+| `AuditLog` | Conversation : sender, message, réponse, tokens, latence |
+
+**RAG (Phase 11)**
+
+| Table | Rôle |
+|---|---|
+| `MoodleSection` | Sections (chapitres) d'un cours Moodle |
+| `MoodleResource` | Ressources (fichiers PDF/DOCX, pages, labels, books, folders) avec `extractedText` et `contenthash` SHA1 |
+| `MoodleResourceChunk` | Chunks de ~1000 chars + `embedding vector(768)` (HNSW pgvector cosine) pour la recherche sémantique |
 
 ---
 
 ## Rôles & permissions
 
-| Action | Admin | Manager | Auditor |
-|---|:---:|:---:|:---:|
-| CRUD utilisateurs | ✅ | — | — |
-| Settings système (toggle Keycloak) | ✅ | — | — |
-| **CRUD plateformes Moodle** | ✅ | lecture | lecture |
-| CRUD agents IA | ✅ | ✅ | lecture |
-| Affectation salon ↔ agent | ✅ | ✅ | lecture |
-| CRUD knowledge base RAG | ✅ | ✅ | lecture |
-| Consulter logs d'audit | ✅ | ✅ | ✅ |
-| Supprimer logs d'audit | ✅ | — | — |
-| Default nouveaux comptes Keycloak | — | — | ✅ |
+| Action | Admin | Manager | Enseignant | Auditor |
+|---|:---:|:---:|:---:|:---:|
+| CRUD utilisateurs | ✅ | — | — | — |
+| Settings système (toggle Keycloak) | ✅ | — | — | — |
+| **CRUD plateformes Moodle** | ✅ | lecture | — | lecture |
+| Sync mod_matrix activities (par plateforme) | ✅ | ✅ | — | — |
+| Sync rooms depuis Synapse (global) | ✅ | ✅ | — | — |
+| Créer un agent IA | ✅ | ✅ | ✅ | — |
+| Modifier / supprimer ses propres agents | ✅ | ✅ | ✅ (siens) | — |
+| Modifier / supprimer tous les agents | ✅ | ✅ | — | — |
+| Voir tous les salons | ✅ | ✅ | — | ✅ |
+| Voir uniquement ses salons (Moodle scope) | — | — | ✅ | — |
+| Affecter un agent à un salon | ✅ | ✅ | ✅ (ses agents → ses salons) | — |
+| Lier une room à un cours (cross-cours) | ✅ | ✅ | — | — |
+| Activer E2EE / renommer un salon | ✅ | ✅ | — | — |
+| Indexation RAG d'un cours | ✅ | ✅ | — | — |
+| Consulter logs d'audit | ✅ | ✅ | — | ✅ |
+| Supprimer logs d'audit | ✅ | — | — | — |
+| Default nouveaux comptes Keycloak | — | — | — | ✅ |
+
+> Le scope ENSEIGNANT est calculé à partir de l'**email Keycloak** : on retrouve le user Moodle correspondant et la liste des cours où il a le rôle `editingteacher` ou `teacher`. Résolution cachée 1h dans `User.moodleUserMap` + `User.lastMoodleSyncAt`. Cf. [src/lib/teacher-scope.ts](src/lib/teacher-scope.ts).
 
 Implémentation : [src/lib/permissions.ts](src/lib/permissions.ts)
 
@@ -508,7 +591,29 @@ Logs **pino** redactent automatiquement `*.password`, `*.token`, `*.access_token
   ```
 
 ### Token Moodle invalide / `accessexception`
-- Le service externe Moodle doit autoriser explicitement chaque `wsfunction` utilisée. Vérifier dans Moodle : *Site administration → Plugins → Web services → External services → Functions*.
+- Le service externe Moodle doit autoriser explicitement chaque `wsfunction` utilisée. Vérifier dans Moodle : *Site administration → Plugins → Web services → External services → Functions* (cf. liste détaillée en section [Moodle — service Web Services](#moodle--service-web-services)).
+- Si le download des PDF échoue avec `accessexception`, c'est que **« Can download files »** n'est pas coché sur le service externe.
+
+### `/mes-cours` vide pour un ENSEIGNANT
+- L'email Keycloak de l'user doit correspondre **exactement** à son email Moodle (le matching est strict).
+- Le user doit avoir le rôle Moodle `editingteacher` ou `teacher` dans au moins un cours.
+- Le service WS doit avoir les 3 fonctions `core_user_get_users_by_field`, `core_enrol_get_users_courses`, `core_enrol_get_enrolled_users`.
+- Le cache est de 1h dans `User.moodleUserMap` — pour forcer un refresh : `UPDATE "User" SET "lastMoodleSyncAt" = NULL WHERE email = '<email>';`
+
+### Une activité mod_matrix créée côté Moodle n'apparaît pas dans `/moodle/[id]/activities`
+- La synchro mod_matrix est manuelle : aller sur `/moodle/[id]/activities` → bouton **Synchroniser**.
+- Le service WS doit avoir `mod_matrix_get_matrices_by_courses` (sinon `accessexception`).
+- Si l'activité est en mode `target=element-url` (URL Element au lieu de room Matrix native), le `matrix_room_id` est vide côté Moodle → on fait un fallback fuzzy par nom de room. Si plusieurs candidats matchent, le lien est skip (logué en warn).
+
+### Synapse `429 Too Many Requests` lors de la création d'une activité mod_matrix
+- Le plugin invite tous les inscrits du cours d'un coup → dépasse les rate limits `rc_invites` par défaut. Augmenter dans `/etc/matrix-synapse/homeserver.yaml` :
+  ```yaml
+  rc_invites:
+    per_room:  { per_second: 5, burst_count: 100 }
+    per_user:  { per_second: 1, burst_count: 50 }
+    per_issuer: { per_second: 5, burst_count: 100 }
+  ```
+  puis `sudo systemctl restart matrix-synapse`.
 
 ### Bouton "Se connecter avec Keycloak" absent
 - `.env` a-t-il les 3 vars `KEYCLOAK_*` non vides ?
