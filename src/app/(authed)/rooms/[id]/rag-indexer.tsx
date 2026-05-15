@@ -1,13 +1,16 @@
 "use client";
 
-import { useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ArrowPathIcon } from "@heroicons/react/24/outline";
 import {
   fullReindexCourse,
+  getRagJobStatus,
   toggleCourseReindex,
 } from "@/app/(authed)/moodle/actions";
+
+type JobStatus = Awaited<ReturnType<typeof getRagJobStatus>>;
 
 export function RagIndexer({
   courseDbId,
@@ -25,7 +28,48 @@ export function RagIndexer({
   canIndex: boolean;
 }) {
   const [pending, start] = useTransition();
+  const [job, setJob] = useState<JobStatus | null>(null);
   const fullyIndexed = totalChunks > 0 && embeddedChunks === totalChunks;
+  const isJobRunning =
+    job?.state === "active" ||
+    job?.state === "waiting" ||
+    job?.state === "delayed";
+
+  // Polling : tant qu'un job est en cours, on rafraîchit toutes les 2s.
+  // Au démarrage on fait un check unique pour reprendre l'état d'un job
+  // lancé puis page rechargée.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const s = await getRagJobStatus(courseDbId);
+        if (cancelled) return;
+        setJob(s);
+        const stillRunning =
+          s.state === "active" ||
+          s.state === "waiting" ||
+          s.state === "delayed";
+        if (stillRunning) {
+          timer = setTimeout(tick, 2000);
+        } else if (s.state === "completed") {
+          // Un job vient de finir → recharger la page pour les nouveaux stats
+          window.location.reload();
+        }
+      } catch {
+        // Silencieux : on retentera au prochain tick
+        timer = setTimeout(tick, 5000);
+      }
+    };
+
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [courseDbId]);
 
   return (
     <div className="space-y-4">
@@ -55,6 +99,49 @@ export function RagIndexer({
         />
       </div>
 
+      {isJobRunning && (
+        <div className="space-y-2 rounded-lg border border-primary/30 bg-blue-50 p-4">
+          <div className="flex items-center justify-between gap-3 text-sm">
+            <span className="font-medium text-primary">
+              {job?.state === "waiting" || job?.state === "delayed"
+                ? "Indexation en file d'attente…"
+                : "Indexation en cours…"}
+            </span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {Math.round(job?.progress ?? 0)}%
+            </span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-card">
+            <div
+              className="h-full bg-primary transition-all"
+              style={{ width: `${job?.progress ?? 0}%` }}
+            />
+          </div>
+          <div className="text-xs text-muted-foreground">
+            Le worker tourne en arrière-plan — tu peux quitter cette page,
+            l&apos;indexation continuera. Au retour, la barre se remettra à
+            jour automatiquement.
+          </div>
+        </div>
+      )}
+
+      {job?.state === "failed" && (
+        <div className="rounded-lg border border-status-error/30 bg-status-error/5 p-4 text-sm">
+          <div className="font-medium text-status-error">
+            Échec d&apos;indexation
+          </div>
+          {job.error && (
+            <div className="mt-1 font-mono text-xs text-muted-foreground">
+              {job.error}
+            </div>
+          )}
+          <div className="mt-2 text-xs text-muted-foreground">
+            Tu peux relancer ; le worker reprendra où il en était (chunks déjà
+            embeddés sont préservés).
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
         <div className="space-y-0.5">
           <div className="text-sm font-medium">RAG actif sur ce cours</div>
@@ -81,23 +168,23 @@ export function RagIndexer({
       {canIndex && (
         <Button
           type="button"
-          disabled={pending}
+          disabled={pending || isJobRunning}
           onClick={() => {
             if (
               !confirm(
-                "Lancer une réindexation complète ? Cela peut prendre plusieurs minutes selon la taille du cours.",
+                "Lancer une réindexation complète ? Le job tourne en arrière-plan, tu peux quitter la page.",
               )
             )
               return;
             start(async () => {
               try {
                 const r = await fullReindexCourse(courseDbId);
-                alert(
-                  `Indexation OK :\n` +
-                    `• ${r.sync.sections} section(s), ${r.sync.resources} resource(s) syncées\n` +
-                    `• ${r.extract.resources.processed} extraction(s) (${r.extract.resources.skipped} skip, ${r.extract.resources.failed} fail)\n` +
-                    `• ${r.embed.embedded} embedding(s) calculés (${r.embed.alreadyEmbedded} déjà présents)`,
-                );
+                if (r.alreadyQueued) {
+                  alert("Un job est déjà en cours pour ce cours.");
+                }
+                // Force un poll immédiat pour afficher la barre
+                const s = await getRagJobStatus(courseDbId);
+                setJob(s);
               } catch (e) {
                 alert(e instanceof Error ? e.message : "Erreur");
               }
@@ -105,9 +192,13 @@ export function RagIndexer({
           }}
         >
           <ArrowPathIcon
-            className={`size-4 ${pending ? "animate-spin" : ""}`}
+            className={`size-4 ${pending || isJobRunning ? "animate-spin" : ""}`}
           />
-          {pending ? "Indexation en cours…" : "Réindexer le cours"}
+          {isJobRunning
+            ? "Indexation en cours…"
+            : pending
+              ? "Démarrage…"
+              : "Réindexer le cours"}
         </Button>
       )}
     </div>

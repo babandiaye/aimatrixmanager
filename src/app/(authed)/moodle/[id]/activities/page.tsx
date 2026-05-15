@@ -19,6 +19,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { Pagination } from "@/components/ui/pagination";
 import { ArrowLeftIcon } from "@heroicons/react/24/outline";
 import { SyncActivitiesButton } from "./sync-button";
 
@@ -28,25 +29,37 @@ type RoomEntry = {
   timecreated: number;
 };
 
+const PAGE_SIZE = 20;
+
 export default async function MatrixActivitiesPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ page?: string }>;
 }) {
   const session = await auth();
   if (!session?.user) redirect("/login");
   if (!can(session.user.role, "moodle.view")) redirect("/");
 
   const { id } = await params;
+  const sp = await searchParams;
+  const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+
   const platform = await prisma.moodlePlatform.findUnique({ where: { id } });
   if (!platform) notFound();
 
   const canSync = can(session.user.role, "rooms.assign");
 
-  const activities = await prisma.moodleMatrixActivity.findMany({
-    where: { platformId: id },
-    orderBy: [{ courseFullname: "asc" }, { name: "asc" }],
-  });
+  const [total, activities] = await Promise.all([
+    prisma.moodleMatrixActivity.count({ where: { platformId: id } }),
+    prisma.moodleMatrixActivity.findMany({
+      where: { platformId: id },
+      orderBy: [{ courseFullname: "asc" }, { name: "asc" }],
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+    }),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -74,7 +87,7 @@ export default async function MatrixActivitiesPage({
         )}
       </div>
 
-      {activities.length === 0 ? (
+      {total === 0 ? (
         <Card>
           <CardHeader>
             <CardTitle>Aucune activité Matrix détectée</CardTitle>
@@ -89,7 +102,7 @@ export default async function MatrixActivitiesPage({
       ) : (
         <Card>
           <CardHeader>
-            <CardTitle>{activities.length} activité(s)</CardTitle>
+            <CardTitle>{total} activité(s)</CardTitle>
             <CardDescription>
               Cliquer sur l&apos;icône pour ouvrir l&apos;activité directement
               dans Moodle.
@@ -205,6 +218,14 @@ export default async function MatrixActivitiesPage({
                 })}
               </TableBody>
             </Table>
+
+            <Pagination
+              page={page}
+              pageSize={PAGE_SIZE}
+              total={total}
+              hrefBase={`/moodle/${id}/activities`}
+              className="mt-4"
+            />
           </CardContent>
         </Card>
       )}

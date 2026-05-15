@@ -1,6 +1,6 @@
 import NextAuth, { type DefaultSession } from "next-auth";
-import Keycloak from "next-auth/providers/keycloak";
 import { PrismaAdapter } from "@auth/prisma-adapter";
+import authConfig from "./auth.config";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import type { UserRole } from "@prisma/client";
@@ -23,34 +23,14 @@ declare module "next-auth" {
   }
 }
 
-// Auth Keycloak uniquement. Voir README → section Authentification.
-const providers = [
-  Keycloak({
-    clientId: process.env.KEYCLOAK_CLIENT_ID!,
-    clientSecret: process.env.KEYCLOAK_CLIENT_SECRET!,
-    issuer: process.env.KEYCLOAK_ISSUER!,
-    allowDangerousEmailAccountLinking: true,
-  }),
-];
-
 // TTL en secondes — pour le rafraîchissement périodique du rôle dans le JWT.
 // Compromis entre fraîcheur (un changement de rôle se propage en <60s) et
 // charge (une requête DB toutes les 60s par session active).
 const ROLE_REFRESH_TTL = 60;
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  ...authConfig,
   adapter: PrismaAdapter(prisma),
-  session: {
-    strategy: "jwt",
-    // 8h pour une plateforme d'admin (vs 30j par défaut). Réduit la fenêtre
-    // d'exploitation d'un cookie compromis.
-    maxAge: 8 * 60 * 60,
-  },
-  pages: {
-    signIn: "/login",
-    error: "/login",
-  },
-  providers,
   callbacks: {
     async jwt({ token, user, trigger, account }) {
       const t = token as typeof token & {

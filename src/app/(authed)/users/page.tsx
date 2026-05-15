@@ -18,21 +18,35 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { Pagination } from "@/components/ui/pagination";
 import { UserActions } from "./user-actions";
 
-export default async function UsersPage() {
+const PAGE_SIZE = 20;
+
+export default async function UsersPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string }>;
+}) {
   const session = await auth();
   if (!session?.user) redirect("/login");
   if (!can(session.user.role, "users.manage")) redirect("/");
 
-  const users = await prisma.user.findMany({
-    orderBy: { createdAt: "asc" },
-    include: {
-      accounts: { select: { provider: true } },
-    },
-  });
+  const sp = await searchParams;
+  const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
-  const adminCount = users.filter((u) => u.role === "ADMIN").length;
+  const [total, adminCount, users] = await Promise.all([
+    prisma.user.count(),
+    prisma.user.count({ where: { role: "ADMIN" } }),
+    prisma.user.findMany({
+      orderBy: { createdAt: "asc" },
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+      include: {
+        accounts: { select: { provider: true } },
+      },
+    }),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -47,7 +61,7 @@ export default async function UsersPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>{users.length} compte(s)</CardTitle>
+          <CardTitle>{total} compte(s)</CardTitle>
           <CardDescription>
             Les comptes Keycloak sont créés automatiquement à la première
             connexion (rôle <code>AUDITOR</code> par défaut).
@@ -119,6 +133,14 @@ export default async function UsersPage() {
               })}
             </TableBody>
           </Table>
+
+          <Pagination
+            page={page}
+            pageSize={PAGE_SIZE}
+            total={total}
+            hrefBase="/users"
+            className="mt-4"
+          />
         </CardContent>
       </Card>
     </div>

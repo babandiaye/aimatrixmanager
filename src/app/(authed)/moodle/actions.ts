@@ -8,14 +8,12 @@ import { prisma } from "@/lib/prisma";
 import { assertCan } from "@/lib/permissions";
 import { encrypt } from "@/lib/crypto";
 import {
-  getCourseContents,
   listCourses,
   listMatrixActivities,
 } from "@/lib/moodle-ws";
-import {
-  embedCourseChunks,
-  extractCourseContents,
-} from "@/lib/rag-indexer";
+import { syncCourseContentsCore } from "@/lib/moodle-course-sync";
+import { extractCourseContents } from "@/lib/rag-indexer";
+import { enqueueRagIndex, getRagJobStatusByCourse } from "@/lib/queue/rag";
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ mod: "moodle.actions" });
@@ -406,166 +404,25 @@ export async function syncMatrixActivitiesForPlatform(
   };
 }
 
-// ─── RAG Phase 11 — sync structurel (sections + resources) ──────────────────
-//
-// Modules indexables par le RAG. On ne synchronise QUE ces types, les autres
-// (forum, quiz, assign, lesson…) sont ignorés à ce stade. À étendre plus tard
-// quand on aura un parseur pour le forum.
-const INDEXABLE_MODNAMES = new Set([
-  "resource", // fichier upload (PDF/DOCX/PPT/...)
-  "page", // page HTML interne
-  "book", // livre en chapitres
-  "label", // étiquette HTML inline
-  "folder", // dossier de fichiers
-]);
+// ─── RAG Phase 11 — sync structurel + pipeline en queue ─────────────────────
+// La logique pure est dans `@/lib/moodle-course-sync` ; on l'expose ici
+// derrière une vérif d'auth + revalidate. Le full reindex passe par la queue
+// BullMQ (worker en background) pour ne pas bloquer le request handler.
 
 /**
  * Sync la structure pédagogique (sections + resources) d'un cours Moodle vers
- * MoodleSection + MoodleResource. Idempotent : upsert par moodle_id, purge
- * des entités disparues côté Moodle.
- *
- * Ne fait PAS encore l'extraction texte ni les embeddings (Phase 11d/e). Il
- * stocke juste la métadonnée + le HTML brut (description, summary) pour qu'on
- * puisse l'extraire ensuite hors-ligne.
+ * MoodleSection + MoodleResource. Idempotent. Wrapper auth de
+ * `syncCourseContentsCore`.
  */
-export async function syncCourseContents(courseDbId: string): Promise<{
-  sections: number;
-  resources: number;
-  resourcesByType: Record<string, number>;
-  removedSections: number;
-  removedResources: number;
-}> {
+export async function syncCourseContents(courseDbId: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
   assertCan(session.user.role, "rooms.assign");
 
-  const course = await prisma.moodleCourse.findUniqueOrThrow({
-    where: { id: courseDbId },
-    include: { platform: true },
-  });
-
-  const sections = await getCourseContents(course.platform, course.moodleId);
-
-  let totalResources = 0;
-  const byType: Record<string, number> = {};
-  const seenSectionIds: number[] = [];
-  const seenCmids: number[] = [];
-
-  for (const s of sections) {
-    seenSectionIds.push(s.id);
-
-    // Upsert section
-    const dbSection = await prisma.moodleSection.upsert({
-      where: { courseId_moodleId: { courseId: course.id, moodleId: s.id } },
-      create: {
-        platformId: course.platformId,
-        courseId: course.id,
-        moodleId: s.id,
-        name: s.name,
-        summary: s.summary || null,
-        sectionnum: s.section,
-      },
-      update: {
-        name: s.name,
-        summary: s.summary || null,
-        sectionnum: s.section,
-        // On reset l'extraction si le summary a changé. Phase 11d le verra et
-        // re-fera l'extraction texte. Pour l'instant on remet juste à null.
-        extractedText: null,
-        textExtractedAt: null,
-        embeddedAt: null,
-        lastSyncedAt: new Date(),
-      },
-    });
-
-    // Modules dans cette section
-    for (const m of s.modules || []) {
-      if (!INDEXABLE_MODNAMES.has(m.modname)) continue;
-
-      seenCmids.push(m.id);
-      byType[m.modname] = (byType[m.modname] ?? 0) + 1;
-      totalResources++;
-
-      // Pour resource/folder : on prend le premier fichier (resource n'a qu'un
-      // fichier, folder peut en avoir plusieurs — on stocke quand même le 1er,
-      // les autres seront indexés en Phase 11d via getCourseContents).
-      const file = m.contents?.find((c) => c.type === "file");
-
-      await prisma.moodleResource.upsert({
-        where: { platformId_cmid: { platformId: course.platformId, cmid: m.id } },
-        create: {
-          platformId: course.platformId,
-          courseId: course.id,
-          sectionId: dbSection.id,
-          cmid: m.id,
-          modname: m.modname,
-          name: m.name,
-          url: m.url || null,
-          description: m.description || null,
-          filename: file?.filename || null,
-          mimetype: file?.mimetype || null,
-          filesize: file?.filesize || null,
-          fileurl: file?.fileurl || null,
-        },
-        update: {
-          sectionId: dbSection.id,
-          modname: m.modname,
-          name: m.name,
-          url: m.url || null,
-          description: m.description || null,
-          filename: file?.filename || null,
-          mimetype: file?.mimetype || null,
-          filesize: file?.filesize || null,
-          fileurl: file?.fileurl || null,
-          // Reset l'extraction si fileurl change (nouveau fichier ou même
-          // module mais contenu modifié — on hashe au download)
-          extractedText: null,
-          textExtractedAt: null,
-          embeddedAt: null,
-          syncError: null,
-          lastSyncedAt: new Date(),
-        },
-      });
-    }
-  }
-
-  // Purge — sections / resources qui ont disparu côté Moodle (cascade chunks)
-  const { count: removedResources } = await prisma.moodleResource.deleteMany({
-    where: {
-      courseId: course.id,
-      ...(seenCmids.length ? { cmid: { notIn: seenCmids } } : {}),
-    },
-  });
-  const { count: removedSections } = await prisma.moodleSection.deleteMany({
-    where: {
-      courseId: course.id,
-      ...(seenSectionIds.length
-        ? { moodleId: { notIn: seenSectionIds } }
-        : {}),
-    },
-  });
-
-  log.info(
-    {
-      course: course.shortname,
-      sections: sections.length,
-      resources: totalResources,
-      byType,
-      removedSections,
-      removedResources,
-    },
-    "Sync course contents",
-  );
+  const r = await syncCourseContentsCore(courseDbId);
   revalidatePath("/moodle");
   revalidatePath(`/rooms`);
-
-  return {
-    sections: sections.length,
-    resources: totalResources,
-    resourcesByType: byType,
-    removedSections,
-    removedResources,
-  };
+  return r;
 }
 
 /**
@@ -585,42 +442,44 @@ export async function reindexCourseContents(courseDbId: string) {
 }
 
 /**
- * Pipeline complet d'indexation RAG d'un cours Moodle :
- *   1. sync structurel (sections + resources via core_course_get_contents)
+ * Pipeline complet d'indexation RAG d'un cours Moodle, **en arrière-plan via
+ * BullMQ** :
+ *   1. sync structurel (sections + resources)
  *   2. extraction texte + chunking (PDFs, pages, labels)
- *   3. embeddings via fromager (nomic-embed-text 768-dim)
+ *   3. embeddings via fromager
+ *   4. flag reindexEnabled
  *
- * Idempotent : peut être relancé. Active automatiquement reindexEnabled
- * (signal d'opt-in du cours).
+ * Retourne immédiatement avec le jobId — l'UI doit poll `getRagJobStatus`
+ * pour suivre la progression. Si un job du même cours est déjà queued/active,
+ * on retourne ce job existant (idempotence).
  */
 export async function fullReindexCourse(courseDbId: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
   assertCan(session.user.role, "rooms.assign");
 
-  // 1. Sync structurel
-  const sync = await syncCourseContents(courseDbId);
-
-  // 2. Extraction + chunking
-  const extract = await extractCourseContents(courseDbId);
-
-  // 3. Embeddings (peut être long si gros cours — pas de timeout côté Next,
-  // mais le client UI verra un spinner pendant tout le process)
-  const embed = await embedCourseChunks(courseDbId);
-
-  // 4. Active reindexEnabled (opt-in implicite)
-  await prisma.moodleCourse.update({
-    where: { id: courseDbId },
-    data: { reindexEnabled: true },
+  const r = await enqueueRagIndex({
+    courseDbId,
+    triggeredBy: session.user.id,
   });
-
   log.info(
-    { courseDbId, sync, extract, embed },
-    "Full reindex pipeline OK",
+    { courseDbId, jobId: r.jobId, alreadyQueued: r.alreadyQueued },
+    "Full reindex enqueued",
   );
   revalidatePath("/moodle");
   revalidatePath("/rooms");
-  return { sync, extract, embed };
+  return r;
+}
+
+/**
+ * Lit l'état d'un job RAG pour un cours (pour polling UI).
+ */
+export async function getRagJobStatus(courseDbId: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  // Lecture seule, pas besoin de rooms.assign — toute personne qui voit
+  // le cours peut poll le statut.
+  return getRagJobStatusByCourse(courseDbId);
 }
 
 export async function toggleCourseReindex(

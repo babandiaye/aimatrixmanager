@@ -1,5 +1,10 @@
-import { auth } from "@/auth";
+import NextAuth from "next-auth";
 import { NextResponse } from "next/server";
+import authConfig from "./auth.config";
+
+// Edge-safe auth (sans adapter Prisma). Le refresh de rôle + audit logs
+// restent dans `@/auth` qui tourne au niveau page (Node runtime).
+const { auth } = NextAuth(authConfig);
 
 const PUBLIC_PREFIXES = ["/login", "/api/auth"];
 const PUBLIC_EXACT = ["/"];
