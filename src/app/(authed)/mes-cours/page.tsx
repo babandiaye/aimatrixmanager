@@ -28,7 +28,8 @@ export default async function MesCoursPage() {
   }
 
   // Pour ENSEIGNANT : résoudre ses cours Moodle (1er accès = appels WS, ensuite cache 1h)
-  // Pour ADMIN/MANAGER : tous les cours.
+  // Pour ADMIN/MANAGER : tous les cours qui ont au moins un salon Matrix lié.
+  // (Sinon on noierait l'admin dans 100+ cours synchronisés sans intérêt opérationnel.)
   const teacherCourseIds =
     session.user.role === "ENSEIGNANT"
       ? await resolveTeacherCourseIds(session.user.id)
@@ -38,7 +39,7 @@ export default async function MesCoursPage() {
     where:
       teacherCourseIds !== null
         ? { id: { in: teacherCourseIds } }
-        : undefined,
+        : { rooms: { some: { source: "MOODLE" } } },
     include: {
       platform: { select: { key: true, name: true, baseUrl: true } },
       rooms: {
@@ -61,7 +62,7 @@ export default async function MesCoursPage() {
         <p className="text-muted-foreground">
           {session.user.role === "ENSEIGNANT"
             ? "Les cours Moodle où tu es enseignant. Tu peux y affecter tes agents IA."
-            : "Tous les cours Moodle synchronisés."}
+            : "Cours Moodle ayant une activité Matrix liée."}
         </p>
       </div>
 
@@ -92,7 +93,13 @@ export default async function MesCoursPage() {
                   </ul>
                 </>
               ) : (
-                "Lance une synchronisation depuis /moodle."
+                <>
+                  Aucun cours n&apos;a encore d&apos;activité Matrix liée. Va
+                  dans <code>/moodle</code> → ouvre une plateforme → onglet
+                  Activités Matrix → bouton <strong>Synchroniser</strong> pour
+                  importer les <code>mod_matrix</code> et lier les salons aux
+                  cours.
+                </>
               )}
             </CardDescription>
           </CardHeader>

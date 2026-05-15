@@ -1,22 +1,15 @@
-import NextAuth, { type DefaultSession, type NextAuthConfig } from "next-auth";
-import Credentials from "next-auth/providers/credentials";
+import NextAuth, { type DefaultSession } from "next-auth";
 import Keycloak from "next-auth/providers/keycloak";
 import { PrismaAdapter } from "@auth/prisma-adapter";
-import bcrypt from "bcryptjs";
-import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { isEmergencyLocalLogin, isKeycloakConfigured } from "@/lib/auth-config";
 import { logger } from "@/lib/logger";
 import type { UserRole } from "@prisma/client";
 
 const log = logger.child({ mod: "auth" });
 
-// Étend les types NextAuth pour exposer id, role.
-//
-// ⚠️ Volontairement, on ne stocke PAS `idToken` dans la session JWT — il fait
-// 1-2 KB et embarque chaque requête. Le `id_token` Keycloak est déjà persisté
-// dans la table `Account` par le PrismaAdapter ; on le ré-extrait au moment
-// du logout via `Account.findFirst({ provider: "keycloak", userId })`.
+// Étend les types NextAuth pour exposer id, role et l'id_token Keycloak.
+// L'id_token (~1.2 KB) est stocké dans le JWT pour pouvoir faire un logout
+// backchannel propre via `events.signOut` (cf. livestream pattern).
 declare module "next-auth" {
   interface Session {
     user: {
@@ -30,56 +23,15 @@ declare module "next-auth" {
   }
 }
 
-const credentialsSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
-
-const providers: NextAuthConfig["providers"] = [];
-
-if (isKeycloakConfigured()) {
-  providers.push(
-    Keycloak({
-      clientId: process.env.KEYCLOAK_CLIENT_ID!,
-      clientSecret: process.env.KEYCLOAK_CLIENT_SECRET!,
-      issuer: process.env.KEYCLOAK_ISSUER!,
-      allowDangerousEmailAccountLinking: true,
-    }),
-  );
-}
-
-if (isEmergencyLocalLogin()) {
-  log.warn("EMERGENCY_LOCAL_LOGIN actif — Credentials provider chargé");
-  providers.push(
-    Credentials({
-      name: "Email/Password (urgence)",
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
-      },
-      authorize: async (raw) => {
-        const parsed = credentialsSchema.safeParse(raw);
-        if (!parsed.success) return null;
-
-        const user = await prisma.user.findUnique({
-          where: { email: parsed.data.email },
-        });
-        if (!user || !user.passwordHash) return null;
-
-        const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
-        if (!ok) return null;
-
-        return {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          image: user.image,
-          role: user.role,
-        };
-      },
-    }),
-  );
-}
+// Auth Keycloak uniquement. Voir README → section Authentification.
+const providers = [
+  Keycloak({
+    clientId: process.env.KEYCLOAK_CLIENT_ID!,
+    clientSecret: process.env.KEYCLOAK_CLIENT_SECRET!,
+    issuer: process.env.KEYCLOAK_ISSUER!,
+    allowDangerousEmailAccountLinking: true,
+  }),
+];
 
 // TTL en secondes — pour le rafraîchissement périodique du rôle dans le JWT.
 // Compromis entre fraîcheur (un changement de rôle se propage en <60s) et
@@ -105,12 +57,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         id?: string;
         role?: UserRole;
         provider?: string;
+        id_token?: string;
         roleRefreshedAt?: number;
       };
       const now = Math.floor(Date.now() / 1000);
 
       // Sign-in initial : on capture id, role, provider depuis le user qui
-      // vient du provider (Credentials → DB direct ; OIDC → adapter upsert).
+      // vient du provider OIDC (adapter upsert).
       if (user) {
         t.id = user.id;
         t.role = user.role;
@@ -118,6 +71,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       }
       if (account?.provider) {
         t.provider = account.provider;
+      }
+      // On garde l'id_token dans le JWT pour le logout backchannel — sans ça,
+      // Keycloak affiche sa page « Confirmation de déconnexion » à la place.
+      if (account?.id_token) {
+        t.id_token = account.id_token;
       }
 
       // Sync DB au signin (peu importe le provider) — le rôle DB l'emporte
@@ -206,16 +164,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       }
     },
     async signOut(message) {
+      const t =
+        "token" in message
+          ? (message.token as {
+              id?: string;
+              email?: string | null;
+              provider?: string;
+              id_token?: string;
+            } | null)
+          : null;
+
+      // 1) Audit log (best-effort, ne bloque pas le logout)
       try {
-        // signOut event reçoit { session } (DB strategy) ou { token } (JWT)
-        const t =
-          "token" in message
-            ? (message.token as {
-                id?: string;
-                email?: string | null;
-                provider?: string;
-              } | null)
-            : null;
         await prisma.authAuditLog.create({
           data: {
             type: "SIGN_OUT",
@@ -226,6 +186,33 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         });
       } catch (e) {
         log.warn({ err: e }, "AuthAuditLog SIGN_OUT insert failed");
+      }
+
+      // 2) Backchannel logout Keycloak : fetch serveur → Keycloak qui
+      // invalide la session SSO sans que le navigateur ne voie la page
+      // « Confirmation de déconnexion ». Avec id_token_hint valide,
+      // Keycloak ne demande pas confirmation. On ne suit pas la redirection
+      // de réponse — NextAuth gère le redirect côté navigateur via signOut.
+      if (t?.id_token && process.env.KEYCLOAK_ISSUER) {
+        try {
+          const url = new URL(
+            `${process.env.KEYCLOAK_ISSUER}/protocol/openid-connect/logout`,
+          );
+          url.searchParams.set("id_token_hint", t.id_token);
+          if (process.env.KEYCLOAK_CLIENT_ID) {
+            url.searchParams.set("client_id", process.env.KEYCLOAK_CLIENT_ID);
+          }
+          const r = await fetch(url.toString(), {
+            method: "GET",
+            redirect: "manual",
+          });
+          log.info(
+            { status: r.status, userId: t.id },
+            "Keycloak backchannel logout",
+          );
+        } catch (e) {
+          log.warn({ err: e }, "Keycloak backchannel logout failed");
+        }
       }
     },
   },
