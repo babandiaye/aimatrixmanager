@@ -7,7 +7,15 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertCan } from "@/lib/permissions";
 import { encrypt } from "@/lib/crypto";
-import { listCourses, listMatrixActivities } from "@/lib/moodle-ws";
+import {
+  getCourseContents,
+  listCourses,
+  listMatrixActivities,
+} from "@/lib/moodle-ws";
+import {
+  embedCourseChunks,
+  extractCourseContents,
+} from "@/lib/rag-indexer";
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ mod: "moodle.actions" });
@@ -396,4 +404,236 @@ export async function syncMatrixActivitiesForPlatform(
     linkedRooms,
     linkedByName,
   };
+}
+
+// ─── RAG Phase 11 — sync structurel (sections + resources) ──────────────────
+//
+// Modules indexables par le RAG. On ne synchronise QUE ces types, les autres
+// (forum, quiz, assign, lesson…) sont ignorés à ce stade. À étendre plus tard
+// quand on aura un parseur pour le forum.
+const INDEXABLE_MODNAMES = new Set([
+  "resource", // fichier upload (PDF/DOCX/PPT/...)
+  "page", // page HTML interne
+  "book", // livre en chapitres
+  "label", // étiquette HTML inline
+  "folder", // dossier de fichiers
+]);
+
+/**
+ * Sync la structure pédagogique (sections + resources) d'un cours Moodle vers
+ * MoodleSection + MoodleResource. Idempotent : upsert par moodle_id, purge
+ * des entités disparues côté Moodle.
+ *
+ * Ne fait PAS encore l'extraction texte ni les embeddings (Phase 11d/e). Il
+ * stocke juste la métadonnée + le HTML brut (description, summary) pour qu'on
+ * puisse l'extraire ensuite hors-ligne.
+ */
+export async function syncCourseContents(courseDbId: string): Promise<{
+  sections: number;
+  resources: number;
+  resourcesByType: Record<string, number>;
+  removedSections: number;
+  removedResources: number;
+}> {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "rooms.assign");
+
+  const course = await prisma.moodleCourse.findUniqueOrThrow({
+    where: { id: courseDbId },
+    include: { platform: true },
+  });
+
+  const sections = await getCourseContents(course.platform, course.moodleId);
+
+  let totalResources = 0;
+  const byType: Record<string, number> = {};
+  const seenSectionIds: number[] = [];
+  const seenCmids: number[] = [];
+
+  for (const s of sections) {
+    seenSectionIds.push(s.id);
+
+    // Upsert section
+    const dbSection = await prisma.moodleSection.upsert({
+      where: { courseId_moodleId: { courseId: course.id, moodleId: s.id } },
+      create: {
+        platformId: course.platformId,
+        courseId: course.id,
+        moodleId: s.id,
+        name: s.name,
+        summary: s.summary || null,
+        sectionnum: s.section,
+      },
+      update: {
+        name: s.name,
+        summary: s.summary || null,
+        sectionnum: s.section,
+        // On reset l'extraction si le summary a changé. Phase 11d le verra et
+        // re-fera l'extraction texte. Pour l'instant on remet juste à null.
+        extractedText: null,
+        textExtractedAt: null,
+        embeddedAt: null,
+        lastSyncedAt: new Date(),
+      },
+    });
+
+    // Modules dans cette section
+    for (const m of s.modules || []) {
+      if (!INDEXABLE_MODNAMES.has(m.modname)) continue;
+
+      seenCmids.push(m.id);
+      byType[m.modname] = (byType[m.modname] ?? 0) + 1;
+      totalResources++;
+
+      // Pour resource/folder : on prend le premier fichier (resource n'a qu'un
+      // fichier, folder peut en avoir plusieurs — on stocke quand même le 1er,
+      // les autres seront indexés en Phase 11d via getCourseContents).
+      const file = m.contents?.find((c) => c.type === "file");
+
+      await prisma.moodleResource.upsert({
+        where: { platformId_cmid: { platformId: course.platformId, cmid: m.id } },
+        create: {
+          platformId: course.platformId,
+          courseId: course.id,
+          sectionId: dbSection.id,
+          cmid: m.id,
+          modname: m.modname,
+          name: m.name,
+          url: m.url || null,
+          description: m.description || null,
+          filename: file?.filename || null,
+          mimetype: file?.mimetype || null,
+          filesize: file?.filesize || null,
+          fileurl: file?.fileurl || null,
+        },
+        update: {
+          sectionId: dbSection.id,
+          modname: m.modname,
+          name: m.name,
+          url: m.url || null,
+          description: m.description || null,
+          filename: file?.filename || null,
+          mimetype: file?.mimetype || null,
+          filesize: file?.filesize || null,
+          fileurl: file?.fileurl || null,
+          // Reset l'extraction si fileurl change (nouveau fichier ou même
+          // module mais contenu modifié — on hashe au download)
+          extractedText: null,
+          textExtractedAt: null,
+          embeddedAt: null,
+          syncError: null,
+          lastSyncedAt: new Date(),
+        },
+      });
+    }
+  }
+
+  // Purge — sections / resources qui ont disparu côté Moodle (cascade chunks)
+  const { count: removedResources } = await prisma.moodleResource.deleteMany({
+    where: {
+      courseId: course.id,
+      ...(seenCmids.length ? { cmid: { notIn: seenCmids } } : {}),
+    },
+  });
+  const { count: removedSections } = await prisma.moodleSection.deleteMany({
+    where: {
+      courseId: course.id,
+      ...(seenSectionIds.length
+        ? { moodleId: { notIn: seenSectionIds } }
+        : {}),
+    },
+  });
+
+  log.info(
+    {
+      course: course.shortname,
+      sections: sections.length,
+      resources: totalResources,
+      byType,
+      removedSections,
+      removedResources,
+    },
+    "Sync course contents",
+  );
+  revalidatePath("/moodle");
+  revalidatePath(`/rooms`);
+
+  return {
+    sections: sections.length,
+    resources: totalResources,
+    resourcesByType: byType,
+    removedSections,
+    removedResources,
+  };
+}
+
+/**
+ * Réindexe un cours pour le RAG : extrait le texte de toutes ses sections
+ * et resources, regénère les chunks (sans embeddings — Phase 11e séparée).
+ * Pré-requis : sync structurel déjà fait (syncCourseContents).
+ */
+export async function reindexCourseContents(courseDbId: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "rooms.assign");
+
+  const r = await extractCourseContents(courseDbId);
+  revalidatePath("/moodle");
+  revalidatePath("/rooms");
+  return r;
+}
+
+/**
+ * Pipeline complet d'indexation RAG d'un cours Moodle :
+ *   1. sync structurel (sections + resources via core_course_get_contents)
+ *   2. extraction texte + chunking (PDFs, pages, labels)
+ *   3. embeddings via fromager (nomic-embed-text 768-dim)
+ *
+ * Idempotent : peut être relancé. Active automatiquement reindexEnabled
+ * (signal d'opt-in du cours).
+ */
+export async function fullReindexCourse(courseDbId: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "rooms.assign");
+
+  // 1. Sync structurel
+  const sync = await syncCourseContents(courseDbId);
+
+  // 2. Extraction + chunking
+  const extract = await extractCourseContents(courseDbId);
+
+  // 3. Embeddings (peut être long si gros cours — pas de timeout côté Next,
+  // mais le client UI verra un spinner pendant tout le process)
+  const embed = await embedCourseChunks(courseDbId);
+
+  // 4. Active reindexEnabled (opt-in implicite)
+  await prisma.moodleCourse.update({
+    where: { id: courseDbId },
+    data: { reindexEnabled: true },
+  });
+
+  log.info(
+    { courseDbId, sync, extract, embed },
+    "Full reindex pipeline OK",
+  );
+  revalidatePath("/moodle");
+  revalidatePath("/rooms");
+  return { sync, extract, embed };
+}
+
+export async function toggleCourseReindex(
+  courseDbId: string,
+  enabled: boolean,
+) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "rooms.assign");
+
+  await prisma.moodleCourse.update({
+    where: { id: courseDbId },
+    data: { reindexEnabled: enabled },
+  });
+  revalidatePath("/rooms");
 }

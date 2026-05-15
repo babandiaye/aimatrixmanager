@@ -6,7 +6,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertCan } from "@/lib/permissions";
 
-const roleSchema = z.enum(["ADMIN", "MANAGER", "AUDITOR"]);
+const roleSchema = z.enum(["ADMIN", "MANAGER", "ENSEIGNANT", "AUDITOR"]);
 
 async function countAdmins(): Promise<number> {
   return prisma.user.count({ where: { role: "ADMIN" } });

@@ -6,7 +6,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { assertCan } from "@/lib/permissions";
+import { assertCan, can, canAny } from "@/lib/permissions";
 import { decrypt, encrypt } from "@/lib/crypto";
 import {
   buildMxid,
@@ -21,6 +21,34 @@ import { setupCrossSigningForAgent, signAgentDevice } from "@/lib/agent-cross-si
 import { logger } from "@/lib/logger";
 
 const log = logger.child({ mod: "agents.actions" });
+
+/**
+ * Vérifie qu'un user a le droit d'agir sur cet agent : soit perm globale,
+ * soit perm `*-own` ET il est le créateur. Throw "Forbidden" sinon.
+ * Utilisé par update/delete/setStatus/rotateToken/signDevice.
+ */
+async function assertAgentEditable(
+  role: string,
+  userId: string,
+  agentId: string,
+  action: "update" | "delete",
+): Promise<void> {
+  const globalPerm = action === "update" ? "agents.update" : "agents.delete";
+  const ownPerm = action === "update" ? "agents.update-own" : "agents.delete-own";
+
+  if (can(role as never, globalPerm)) return; // ADMIN/MANAGER passent direct
+  if (!can(role as never, ownPerm)) {
+    throw new Error(`Forbidden: rôle ${role} n'a pas la permission ${globalPerm}`);
+  }
+  // ENSEIGNANT : doit être le créateur
+  const a = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { createdById: true },
+  });
+  if (!a || a.createdById !== userId) {
+    throw new Error("Forbidden: vous n'êtes pas le créateur de cet agent");
+  }
+}
 
 const slugRe = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
@@ -206,7 +234,7 @@ export async function updateAgent(
 ): Promise<AgentFormState> {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "agents.update");
+  await assertAgentEditable(session.user.role, session.user.id, id, "update");
 
   // À l'édition, le slug n'est pas modifiable (le MXID Matrix est figé)
   // → on omit() sur l'objet pur (sans refine) puis on réapplique le refine
@@ -261,7 +289,7 @@ export async function setAgentStatus(
 ) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "agents.update");
+  await assertAgentEditable(session.user.role, session.user.id, id, "update");
 
   await prisma.agent.update({
     where: { id },
@@ -273,7 +301,7 @@ export async function setAgentStatus(
 /**
  * Supprime définitivement un agent :
  *  1. Désactive le compte Matrix côté Synapse (`deactivate`, irréversible)
- *  2. Supprime la row Agent (cascade → RoomAgent + AuditLog + KnowledgeChunk)
+ *  2. Supprime la row Agent (cascade → RoomAgent + AuditLog + AgentCrossSigning)
  *
  * Si la désactivation Matrix échoue (ex: réseau Synapse down), on stoppe
  * — pas d'orphan Matrix sans suppression DB ou inversement.
@@ -281,7 +309,7 @@ export async function setAgentStatus(
 export async function deleteAgent(id: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "agents.delete");
+  await assertAgentEditable(session.user.role, session.user.id, id, "delete");
 
   const agent = await prisma.agent.findUniqueOrThrow({
     where: { id },
@@ -319,7 +347,7 @@ export async function deleteAgent(id: string) {
 export async function rotateAgentToken(id: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "agents.update");
+  await assertAgentEditable(session.user.role, session.user.id, id, "update");
 
   const agent = await prisma.agent.findUniqueOrThrow({
     where: { id },
@@ -365,14 +393,33 @@ export async function rotateAgentToken(id: string) {
 /**
  * Signe le device courant de l'agent avec sa SSK déjà persistée. À appeler
  * APRÈS que le bot Python ait démarré (et donc uploadé ses device_keys via
- * matrix-nio). Si l'admin clique trop tôt, on renvoie une erreur explicite.
+ * matrix-nio). Retourne `{ok: true}` ou `{ok: false, error: <message>}` —
+ * ne throw pas (sinon Next.js prod masque le message en 500 générique).
  */
-export async function signAgentDeviceAction(id: string) {
-  const session = await auth();
-  if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "agents.update");
+export type SignDeviceResult =
+  | { ok: true }
+  | { ok: false; error: string; hint?: string };
 
-  const agent = await prisma.agent.findUniqueOrThrow({
+export async function signAgentDeviceAction(
+  id: string,
+): Promise<SignDeviceResult> {
+  const session = await auth();
+  if (!session?.user) return { ok: false, error: "Unauthorized" };
+  try {
+    await assertAgentEditable(
+      session.user.role,
+      session.user.id,
+      id,
+      "update",
+    );
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Permission insuffisante",
+    };
+  }
+
+  const agent = await prisma.agent.findUnique({
     where: { id },
     select: {
       slug: true,
@@ -381,22 +428,43 @@ export async function signAgentDeviceAction(id: string) {
       matrixAccessToken: true,
     },
   });
+  if (!agent) return { ok: false, error: "Agent introuvable" };
   if (!agent.matrixDeviceId || !agent.matrixAccessToken) {
-    throw new Error(
-      "L'agent n'a pas de device_id / access_token — rotate d'abord.",
-    );
+    return {
+      ok: false,
+      error: "L'agent n'a pas de device_id / access_token",
+      hint: "Régénère le token d'abord.",
+    };
   }
 
-  await signAgentDevice({
-    agentId: id,
-    userId: agent.matrixUserId,
-    deviceId: agent.matrixDeviceId,
-    accessToken: decrypt(agent.matrixAccessToken),
-  });
+  try {
+    await signAgentDevice({
+      agentId: id,
+      userId: agent.matrixUserId,
+      deviceId: agent.matrixDeviceId,
+      accessToken: decrypt(agent.matrixAccessToken),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/device_keys absent/i.test(msg)) {
+      return {
+        ok: false,
+        error: "Le bot Python n'a pas encore uploadé ses device_keys.",
+        hint:
+          "Attends ~60s après un rotate (la reconcile_loop redémarre le runner et matrix-nio appelle keys/upload), puis réessaie.",
+      };
+    }
+    log.error(
+      { err: msg, slug: agent.slug },
+      "Échec signature device — erreur non récupérable",
+    );
+    return { ok: false, error: msg };
+  }
 
   log.info(
     { slug: agent.slug, deviceId: agent.matrixDeviceId },
     "Device signé manuellement par l'admin",
   );
   revalidatePath("/agents");
+  return { ok: true };
 }

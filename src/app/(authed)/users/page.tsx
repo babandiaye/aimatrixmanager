@@ -92,7 +92,9 @@ export default async function UsersPage() {
                             ? "published"
                             : u.role === "MANAGER"
                               ? "processed"
-                              : "neutral"
+                              : u.role === "ENSEIGNANT"
+                                ? "processing"
+                                : "neutral"
                         }
                       >
                         {u.role}

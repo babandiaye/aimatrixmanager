@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
-import { can, roomScopeFor } from "@/lib/permissions";
+import { can, canAny } from "@/lib/permissions";
+import {
+  resolveTeacherCourseIds,
+  roomWhereForTeacher,
+} from "@/lib/teacher-scope";
 import { prisma } from "@/lib/prisma";
 import {
   Card,
@@ -27,30 +31,55 @@ import {
   AcademicCapIcon,
   ChatBubbleLeftRightIcon,
 } from "@heroicons/react/24/outline";
+import { cn } from "@/lib/utils";
+import type { Prisma } from "@prisma/client";
 import { SyncRoomsButton } from "./sync-rooms-button";
 
 const PAGE_SIZE = 20;
 
+type SortMode = "date" | "source-moodle" | "source-chat";
+
+function parseSort(v: string | undefined): SortMode {
+  return v === "source-moodle" || v === "source-chat" ? v : "date";
+}
+
+function orderByFor(sort: SortMode): Prisma.RoomOrderByWithRelationInput[] {
+  if (sort === "source-moodle")
+    return [{ source: "desc" }, { discoveredAt: "desc" }];
+  if (sort === "source-chat")
+    return [{ source: "asc" }, { discoveredAt: "desc" }];
+  return [{ discoveredAt: "desc" }];
+}
+
 export default async function RoomsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string }>;
+  searchParams: Promise<{ page?: string; sort?: string }>;
 }) {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  if (!can(session.user.role, "rooms.view")) redirect("/");
+  if (!canAny(session.user.role, "rooms.view", "rooms.view-own")) redirect("/");
 
-  const canAssign = can(session.user.role, "rooms.assign");
+  // Sync depuis Synapse = opération globale (admin/manager only).
+  // ENSEIGNANT a rooms.assign-own pour assigner SES agents à SES rooms,
+  // mais ne peut pas déclencher la sync globale.
+  const canSyncGlobal = can(session.user.role, "rooms.assign");
 
   const sp = await searchParams;
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  const sort = parseSort(sp.sort);
 
-  const scope = roomScopeFor(session.user.role);
+  // Pour ENSEIGNANT, on résout d'abord ses cours Moodle (cache 1h en DB)
+  const teacherCourseIds =
+    session.user.role === "ENSEIGNANT"
+      ? await resolveTeacherCourseIds(session.user.id)
+      : null;
+  const where = roomWhereForTeacher(session.user.role, teacherCourseIds);
   const [total, rooms] = await Promise.all([
-    prisma.room.count({ where: scope }),
+    prisma.room.count({ where }),
     prisma.room.findMany({
-      where: scope,
-      orderBy: { discoveredAt: "desc" },
+      where,
+      orderBy: orderByFor(sort),
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
       include: {
@@ -76,7 +105,7 @@ export default async function RoomsPage({
             et lien aux cours Moodle.
           </p>
         </div>
-        {canAssign && <SyncRoomsButton />}
+        {canSyncGlobal && <SyncRoomsButton />}
       </div>
 
       {total === 0 ? (
@@ -84,7 +113,7 @@ export default async function RoomsPage({
           <CardHeader>
             <CardTitle>Aucun salon connu</CardTitle>
             <CardDescription>
-              {canAssign
+              {canSyncGlobal
                 ? "Clique sur « Synchroniser » pour importer les salons depuis Synapse."
                 : "Demande à un manager de lancer la synchronisation."}
             </CardDescription>
@@ -101,6 +130,35 @@ export default async function RoomsPage({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Trier par :</span>
+              {(
+                [
+                  { mode: "date" as const, label: "Date (récent)" },
+                  { mode: "source-moodle" as const, label: "Moodle d'abord" },
+                  { mode: "source-chat" as const, label: "Chat d'abord" },
+                ]
+              ).map(({ mode, label }) => {
+                const active = sort === mode;
+                const href =
+                  mode === "date" ? "/rooms" : `/rooms?sort=${mode}`;
+                return (
+                  <Link
+                    key={mode}
+                    href={href}
+                    className={cn(
+                      buttonVariants({
+                        variant: active ? "default" : "outline",
+                        size: "sm",
+                      }),
+                      "h-7 px-3 text-xs",
+                    )}
+                  >
+                    {label}
+                  </Link>
+                );
+              })}
+            </div>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -222,7 +280,7 @@ export default async function RoomsPage({
               page={page}
               pageSize={PAGE_SIZE}
               total={total}
-              hrefBase="/rooms"
+              hrefBase={sort === "date" ? "/rooms" : `/rooms?sort=${sort}`}
             />
           </CardContent>
         </Card>

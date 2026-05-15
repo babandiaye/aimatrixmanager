@@ -16,6 +16,7 @@ datasource db {
 enum UserRole {
   ADMIN
   MANAGER
+  ENSEIGNANT
   AUDITOR
 }
 
@@ -62,6 +63,14 @@ model User {
   image         String?
   passwordHash  String?   // null si l'utilisateur ne se connecte qu'en OIDC
   role          UserRole  @default(AUDITOR)
+
+  // Pour le rôle ENSEIGNANT : mapping résolu plateforme → moodleUserId
+  // (par email, via core_user_get_users_by_field). Format JSON :
+  //   { "<platformId>": <moodleUserId>, ... }
+  // Mis à jour quand resolveTeacherCourses() est appelé. TTL = 1h.
+  moodleUserMap     Json?
+  lastMoodleSyncAt  DateTime?
+
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -160,7 +169,6 @@ model Agent {
 
   assignments      RoomAgent[]
   auditLogs        AuditLog[]
-  knowledgeChunks  KnowledgeChunk[]
   crossSigning     AgentCrossSigning?
 
   @@index([status])
@@ -251,10 +259,20 @@ model MoodleCourse {
   shortname    String
   fullname     String
   lastSyncedAt DateTime?
+
+  // RAG opt-in : si false (défaut), le cours n'est pas indexé même si présent
+  // dans la table — économie de stockage et de calcul d'embeddings. À activer
+  // sur les cours qui ont effectivement un agent Matrix affecté.
+  reindexEnabled Boolean   @default(false)
+  lastIndexedAt  DateTime?
+
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  rooms Room[]
+  rooms     Room[]
+  sections  MoodleSection[]
+  resources MoodleResource[]
+  chunks    MoodleResourceChunk[] @relation("CourseChunks")
 
   @@unique([platformId, moodleId])
   @@index([platformId])
@@ -300,8 +318,6 @@ model RoomAgent {
 
   createdAt DateTime @default(now())
 
-  knowledgeChunks KnowledgeChunk[]
-
   @@unique([roomId, agentId])
   @@index([agentId])
 }
@@ -335,26 +351,96 @@ model AuditLog {
   @@index([senderMxid])
 }
 
-// ─── Base de connaissances RAG ────────────────────────────────────────────────
-// Un chunk peut être :
-//   - global à un agent (roomAgentId = null) → présent dans toutes ses rooms
-//   - spécifique à une assignation (roomAgentId = X) → seulement dans cette room
+// ─── RAG : index pédagogique des cours Moodle ─────────────────────────────────
+// Architecture en 3 niveaux :
+//   MoodleSection  → MoodleResource  → MoodleResourceChunk
+//
+// Un chunk pointe SOIT vers une resource (PDF, page, book…), SOIT vers un
+// summary de section (FK polymorphe : exactly one of resourceId/sectionId).
+// On dénormalise courseId sur le chunk pour scoper le vector search au bon
+// cours sans join (clé pour la perf à 10M+ chunks).
+//
+// L'embedding est nomic-embed-text (768-dim) servi par fromager.unchk.sn.
+// Index HNSW pour la similarité cosine ajouté manuellement post-push (Prisma
+// ne gère pas les index pgvector via le DSL).
 
-model KnowledgeChunk {
-  id          String      @id @default(cuid())
-  agentId     String
-  agent       Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+model MoodleSection {
+  id              String   @id @default(cuid())
+  platformId      String
+  courseId        String
+  course          MoodleCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  moodleId        Int      // section.id côté Moodle
+  name            String
+  summary         String?  @db.Text  // HTML brut de la section
+  extractedText   String?  @db.Text  // HTML strippé pour chunking
+  sectionnum      Int
+  textExtractedAt DateTime?
+  embeddedAt      DateTime?
+  lastSyncedAt    DateTime @default(now())
 
-  roomAgentId String?
-  roomAgent   RoomAgent?  @relation(fields: [roomAgentId], references: [id], onDelete: Cascade)
+  resources MoodleResource[]
+  chunks    MoodleResourceChunk[]
 
-  content     String      @db.Text
-  embedding   Unsupported("vector(1536)")?
-  source      String?     // ex. "moodle:course:42:resource:1234"
-  tokenCount  Int?
+  @@unique([courseId, moodleId])
+  @@index([platformId])
+}
 
-  createdAt   DateTime    @default(now())
+model MoodleResource {
+  id           String   @id @default(cuid())
+  platformId   String
+  courseId     String
+  course       MoodleCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  sectionId    String
+  section      MoodleSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
 
-  @@index([agentId])
-  @@index([roomAgentId])
+  cmid         Int      // course module id (unique côté Moodle)
+  modname      String   // "resource", "page", "book", "label", "folder", ...
+  name         String
+  url          String?  // URL Moodle UI pour link to source
+  description  String?  @db.Text  // HTML brut — c'est LE contenu pour modname=label, intro pour les autres
+
+  // Pour les fichiers (modname=resource/folder)
+  filename     String?
+  mimetype     String?
+  filesize     Int?
+  contenthash  String?  // sha1 du fichier — clé de dédup
+  fileurl      String?  // URL WS (à compléter avec ?token= au moment du download)
+
+  // Texte extrait — vide tant que pas indexé / si type non supporté
+  extractedText String? @db.Text
+
+  textExtractedAt  DateTime?
+  embeddedAt       DateTime?
+  lastSyncedAt     DateTime @default(now())
+  syncError        String?  // dernier message d'erreur (pour debug UI)
+
+  chunks MoodleResourceChunk[]
+
+  @@unique([platformId, cmid])
+  @@index([courseId])
+  @@index([contenthash])
+}
+
+model MoodleResourceChunk {
+  id         String @id @default(cuid())
+
+  // Dénormalisé pour scoper le vector search par cours sans join
+  courseId   String
+  course     MoodleCourse @relation("CourseChunks", fields: [courseId], references: [id], onDelete: Cascade)
+
+  // FK polymorphe : exactement un des deux est non-null
+  resourceId String?
+  resource   MoodleResource? @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  sectionId  String?
+  section    MoodleSection?  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  ordinal    Int
+  text       String @db.Text
+  tokenCount Int?
+
+  embedding  Unsupported("vector(768)")?
+
+  @@index([courseId])
+  @@index([resourceId, ordinal])
+  @@index([sectionId, ordinal])
 }

@@ -53,6 +53,7 @@ export function UserActions({
         <SelectContent>
           <SelectItem value="ADMIN">ADMIN</SelectItem>
           <SelectItem value="MANAGER">MANAGER</SelectItem>
+          <SelectItem value="ENSEIGNANT">ENSEIGNANT</SelectItem>
           <SelectItem value="AUDITOR">AUDITOR</SelectItem>
         </SelectContent>
       </Select>

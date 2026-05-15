@@ -101,10 +101,9 @@ export function AgentRowActions({
               title="Signer le device courant avec la SSK (à faire APRÈS que le bot ait démarré)"
               onClick={() => {
                 start(async () => {
-                  try {
-                    await signAgentDeviceAction(id);
-                  } catch (e) {
-                    alert(e instanceof Error ? e.message : "Erreur");
+                  const r = await signAgentDeviceAction(id);
+                  if (!r.ok) {
+                    alert(`${r.error}${r.hint ? "\n\n" + r.hint : ""}`);
                   }
                 });
               }}

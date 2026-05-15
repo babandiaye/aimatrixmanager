@@ -78,13 +78,18 @@ async def list_enabled_agents() -> list[AgentRow]:
 async def get_room_assignment(
     agent_id: str, matrix_room_id: str
 ) -> Optional[dict]:
-    """Récupère l'affectation (room ↔ agent) si elle existe et est active."""
+    """Récupère l'affectation (room ↔ agent) si elle existe et est active.
+    Retourne aussi le moodleCourseId et le flag reindexEnabled pour décider
+    si on doit faire du RAG sur cette conversation.
+    """
     pool = await get_pool()
     return await pool.fetchrow(
         """
-        SELECT ra.id, ra.enabled, r.id AS room_id, r."moodleCourseId"
+        SELECT ra.id, ra.enabled, r.id AS room_id,
+               r."moodleCourseId", c."reindexEnabled" AS rag_enabled
         FROM "RoomAgent" ra
         JOIN "Room" r ON r.id = ra."roomId"
+        LEFT JOIN "MoodleCourse" c ON c.id = r."moodleCourseId"
         WHERE ra."agentId" = $1 AND r."matrixRoomId" = $2
         """,
         agent_id,
@@ -109,6 +114,112 @@ async def update_heartbeat(agent_id: str) -> None:
         'UPDATE "Agent" SET "lastHeartbeatAt" = NOW() WHERE id = $1',
         agent_id,
     )
+
+
+async def list_course_sections(course_db_id: str) -> list[dict]:
+    """Liste les sections d'un cours avec le compte de resources et chunks
+    pour chacune. Utile pour le tool `list_chapters` exposé à Claude."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT
+          s.id,
+          s.name,
+          s."sectionnum",
+          COUNT(DISTINCT r.id)::int AS resource_count,
+          COUNT(DISTINCT c.id)::int AS chunk_count
+        FROM "MoodleSection" s
+        LEFT JOIN "MoodleResource" r ON r."sectionId" = s.id
+        LEFT JOIN "MoodleResourceChunk" c ON c."sectionId" = s.id OR c."resourceId" = r.id
+        WHERE s."courseId" = $1
+        GROUP BY s.id
+        ORDER BY s."sectionnum"
+        """,
+        course_db_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_section_text(
+    course_db_id: str, section_id: str
+) -> Optional[dict]:
+    """Récupère le texte intégral d'une section (concaténation extractedText
+    de la section + de toutes ses resources). Pour le tool `get_chapter`.
+    """
+    pool = await get_pool()
+    section = await pool.fetchrow(
+        """
+        SELECT id, name, "extractedText" FROM "MoodleSection"
+        WHERE id = $1 AND "courseId" = $2
+        """,
+        section_id,
+        course_db_id,
+    )
+    if not section:
+        return None
+
+    resources = await pool.fetch(
+        """
+        SELECT name, modname, "extractedText"
+        FROM "MoodleResource"
+        WHERE "sectionId" = $1 AND "extractedText" IS NOT NULL
+        ORDER BY id
+        """,
+        section_id,
+    )
+
+    parts: list[str] = []
+    if section["extractedText"]:
+        parts.append(f"# {section['name']} (sommaire)\n\n{section['extractedText']}")
+    for r in resources:
+        parts.append(
+            f"## {r['name']} ({r['modname']})\n\n{r['extractedText']}"
+        )
+    return {
+        "id": section["id"],
+        "name": section["name"],
+        "text": "\n\n".join(parts) if parts else "",
+    }
+
+
+async def search_course_chunks(
+    course_db_id: str,
+    query_embedding: list[float],
+    k: int = 5,
+) -> list[dict]:
+    """Recherche les K chunks les plus proches d'un embedding pour un cours.
+    Utilise l'index HNSW pgvector (cosine distance). Retourne le texte +
+    metadata pour chaque chunk, du plus pertinent au moins.
+
+    Pour passer un vecteur Python list[float] à pgvector, on le sérialise en
+    string `'[0.1,0.2,...]'` puis on cast côté SQL.
+    """
+    pool = await get_pool()
+    vec_literal = "[" + ",".join(repr(float(x)) for x in query_embedding) + "]"
+    rows = await pool.fetch(
+        """
+        SELECT
+          c.id,
+          c.text,
+          c."ordinal",
+          c.embedding <=> $1::vector AS distance,
+          r.name AS resource_name,
+          r.modname AS resource_modname,
+          r.url AS resource_url,
+          s.name AS section_name
+        FROM "MoodleResourceChunk" c
+        LEFT JOIN "MoodleResource" r ON r.id = c."resourceId"
+        LEFT JOIN "MoodleSection" s
+          ON s.id = COALESCE(c."sectionId", r."sectionId")
+        WHERE c."courseId" = $2 AND c.embedding IS NOT NULL
+        ORDER BY c.embedding <=> $1::vector
+        LIMIT $3
+        """,
+        vec_literal,
+        course_db_id,
+        k,
+    )
+    return [dict(r) for r in rows]
 
 
 async def insert_audit_log(

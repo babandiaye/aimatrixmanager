@@ -3,8 +3,12 @@
 import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { assertCan, roomScopeFor } from "@/lib/permissions";
-import type { UserRole } from "@prisma/client";
+import { assertCan, can, canAny, roomScopeFor } from "@/lib/permissions";
+import {
+  resolveTeacherCourseIds,
+  roomWhereForTeacher,
+} from "@/lib/teacher-scope";
+import type { Prisma, UserRole } from "@prisma/client";
 import { decrypt } from "@/lib/crypto";
 import {
   enableRoomEncryption,
@@ -19,16 +23,54 @@ import { logger } from "@/lib/logger";
 const log = logger.child({ mod: "rooms.actions" });
 
 /**
- * Garantit qu'un Manager/Auditor n'agisse pas sur un salon natif (créé hors
- * Moodle) — même via un appel direct au server action en bypassant l'UI.
+ * Garantit qu'un user n'agisse pas sur un salon hors de son scope :
+ *  - ADMIN : pas de filtre
+ *  - MANAGER/AUDITOR : salons MOODLE uniquement
+ *  - ENSEIGNANT : salons MOODLE liés à un cours où il est prof
  * Réponse 404-like (message générique) pour ne pas révéler l'existence.
  */
-async function assertRoomAccessible(role: UserRole, roomId: string) {
+async function assertRoomAccessible(
+  role: UserRole,
+  userId: string,
+  roomId: string,
+) {
+  // Compose le where : id strict + scope (source/courseId filter)
+  let where: Prisma.RoomWhereInput = { id: roomId, ...roomScopeFor(role) };
+  if (role === "ENSEIGNANT") {
+    const teacherCourseIds = await resolveTeacherCourseIds(userId);
+    where = {
+      id: roomId,
+      AND: roomWhereForTeacher("ENSEIGNANT", teacherCourseIds),
+    };
+  }
   const room = await prisma.room.findFirst({
-    where: { id: roomId, ...roomScopeFor(role) },
+    where,
     select: { id: true },
   });
   if (!room) throw new Error("Salon introuvable");
+}
+
+/**
+ * Vérifie qu'un ENSEIGNANT peut affecter cet agent : doit en être créateur.
+ * Pour ADMIN/MANAGER : pas de restriction, ils ont `rooms.assign`.
+ */
+async function assertAgentAssignable(
+  role: UserRole,
+  userId: string,
+  agentId: string,
+) {
+  if (can(role, "rooms.assign")) return; // ADMIN/MANAGER
+  if (!can(role, "rooms.assign-own")) {
+    throw new Error(`Forbidden: rôle ${role} ne peut pas affecter d'agent`);
+  }
+  // ENSEIGNANT : l'agent doit lui appartenir
+  const a = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { createdById: true },
+  });
+  if (!a || a.createdById !== userId) {
+    throw new Error("Forbidden: cet agent n'est pas le vôtre");
+  }
 }
 
 export async function syncRoomsFromSynapse(): Promise<{
@@ -75,8 +117,8 @@ export async function syncRoomsFromSynapse(): Promise<{
 export async function assignAgentToRoom(roomId: string, agentId: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "rooms.assign");
-  await assertRoomAccessible(session.user.role, roomId);
+  await assertAgentAssignable(session.user.role, session.user.id, agentId);
+  await assertRoomAccessible(session.user.role, session.user.id, roomId);
 
   const [room, agent] = await Promise.all([
     prisma.room.findUniqueOrThrow({
@@ -132,10 +174,21 @@ export async function assignAgentToRoom(roomId: string, agentId: string) {
 export async function unassignAgent(assignmentId: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "rooms.assign");
+  if (!canAny(session.user.role, "rooms.assign", "rooms.assign-own")) {
+    throw new Error("Forbidden: pas de permission rooms.assign");
+  }
 
+  // Scope room : ENSEIGNANT doit en plus appartenir au cours via les
+  // chunks résolus, on délègue à roomWhereForTeacher après une résolution
+  const teacherCourseIds =
+    session.user.role === "ENSEIGNANT"
+      ? await resolveTeacherCourseIds(session.user.id)
+      : null;
   const a = await prisma.roomAgent.findFirst({
-    where: { id: assignmentId, room: roomScopeFor(session.user.role) },
+    where: {
+      id: assignmentId,
+      room: roomWhereForTeacher(session.user.role, teacherCourseIds),
+    },
     include: {
       room: { select: { matrixRoomId: true } },
       agent: { select: { slug: true, matrixAccessToken: true } },
@@ -170,10 +223,19 @@ export async function toggleAssignmentEnabled(
 ) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "rooms.assign");
+  if (!canAny(session.user.role, "rooms.assign", "rooms.assign-own")) {
+    throw new Error("Forbidden: pas de permission rooms.assign");
+  }
 
+  const teacherCourseIds =
+    session.user.role === "ENSEIGNANT"
+      ? await resolveTeacherCourseIds(session.user.id)
+      : null;
   const existing = await prisma.roomAgent.findFirst({
-    where: { id: assignmentId, room: roomScopeFor(session.user.role) },
+    where: {
+      id: assignmentId,
+      room: roomWhereForTeacher(session.user.role, teacherCourseIds),
+    },
     select: { id: true },
   });
   if (!existing) throw new Error("Affectation introuvable");
@@ -199,8 +261,10 @@ const renameSchema = z
 export async function renameRoom(roomId: string, newName: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "rooms.assign");
-  await assertRoomAccessible(session.user.role, roomId);
+  if (!canAny(session.user.role, "rooms.assign", "rooms.assign-own")) {
+    throw new Error("Forbidden: pas de permission rooms.assign");
+  }
+  await assertRoomAccessible(session.user.role, session.user.id, roomId);
 
   const parsed = renameSchema.safeParse(newName.trim());
   if (!parsed.success) throw new Error(parsed.error.issues[0].message);
@@ -230,8 +294,9 @@ export async function renameRoom(roomId: string, newName: string) {
 export async function activateRoomEncryption(roomId: string) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
+  // Activer E2EE est une action critique réservée à ADMIN/MANAGER (irréversible)
   assertCan(session.user.role, "rooms.assign");
-  await assertRoomAccessible(session.user.role, roomId);
+  await assertRoomAccessible(session.user.role, session.user.id, roomId);
 
   const room = await prisma.room.findUniqueOrThrow({
     where: { id: roomId },
@@ -258,8 +323,10 @@ export async function linkRoomToCourse(
 ) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
+  // Lier une room à un cours est réservé à ADMIN/MANAGER — l'enseignant ne
+  // peut pas réaffecter des rooms à des cours arbitraires.
   assertCan(session.user.role, "rooms.assign");
-  await assertRoomAccessible(session.user.role, roomId);
+  await assertRoomAccessible(session.user.role, session.user.id, roomId);
 
   await prisma.room.update({
     where: { id: roomId },

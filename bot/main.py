@@ -33,6 +33,8 @@ from nio import (
 
 import db
 import llm
+import rag
+import rag_tools
 from crypto_utils import decrypt
 
 load_dotenv()
@@ -216,10 +218,19 @@ class AgentRunner:
     STREAM_EDIT_DELTA = int(os.getenv("STREAM_EDIT_DELTA", "25"))
 
     async def ask_llm_streaming(
-        self, room_id: str, question: str
+        self,
+        room_id: str,
+        question: str,
+        course_db_id: Optional[str] = None,
+        rag_enabled: bool = False,
     ) -> tuple[str, dict]:
         """Place un placeholder, stream la réponse LLM en éditant
-        progressivement, puis retourne (texte_final, usage)."""
+        progressivement, puis retourne (texte_final, usage).
+
+        Si `rag_enabled` et `course_db_id` sont set, on fait du RAG : embed
+        la question, retrouve les K chunks les plus proches, injecte dans le
+        system prompt pour ce tour. Failsafe : si retrieval foire, on tombe
+        en mode normal sans planter."""
         history = self.history.setdefault(room_id, [])
         history.append({"role": "user", "content": question})
 
@@ -232,34 +243,105 @@ class AgentRunner:
             history.append({"role": "assistant", "content": answer})
             return answer, usage
 
+        # 1.5 Décision RAG : 3 modes possibles
+        #   - tool-mode : provider=ANTHROPIC + RAG enabled → function calling
+        #     (Claude décide quand search_course / get_chapter)
+        #   - naive RAG : provider=OLLAMA + RAG enabled → top-K injecté
+        #   - no-RAG : pas de cours lié ou reindex désactivé → comportement
+        #     classique (juste le system_prompt de base)
+        use_tools = (
+            rag_enabled
+            and course_db_id
+            and self.row.provider == "ANTHROPIC"
+        )
+        system_override = None
+        if rag_enabled and course_db_id and not use_tools:
+            try:
+                ctx = await rag.retrieve_context(course_db_id, question)
+                if ctx:
+                    system_override = rag.build_system_prompt_with_context(
+                        self.row.system_prompt, ctx
+                    )
+                    self.log.info(
+                        f"RAG naïf : contexte injecté ({len(ctx)} chars)"
+                    )
+            except Exception as e:
+                self.log.warning(f"RAG retrieval failed (fallback no-RAG): {e}")
+
         buffer = ""
         last_edit_t = time.monotonic()
         last_edit_len = 0
         usage: dict = {}
 
         try:
-            async for chunk, u in llm.stream_call(
-                self.row, history, MAX_HISTORY
-            ):
-                if chunk:
-                    buffer += chunk
-                if u is not None:
-                    usage = u
-                # Throttle : édite si l'intervalle est écoulé OU le delta
-                # dépasse le seuil. OR (pas AND) — sur un débit lent
-                # l'intervalle déclenche même avec peu de texte ; sur un
-                # gros chunk soudain le delta déclenche immédiatement.
-                now = time.monotonic()
-                if buffer and (
-                    now - last_edit_t >= self.STREAM_EDIT_INTERVAL
-                    or len(buffer) - last_edit_len >= self.STREAM_EDIT_DELTA
+            if use_tools:
+                # Tool-mode (Anthropic) : Claude décide d'utiliser les tools.
+                async def dispatcher(name: str, input_: dict) -> str:
+                    return await rag_tools.dispatch(name, input_, course_db_id)
+
+                tool_system = rag_tools.system_prompt_for_tools(
+                    self.row.system_prompt
+                )
+                self.log.info(f"RAG tool-mode pour {room_id[:25]}")
+                async for kind, payload, u in llm.stream_anthropic_with_tools(
+                    self.row,
+                    history,
+                    MAX_HISTORY,
+                    rag_tools.TOOL_DEFINITIONS,
+                    tool_system,
+                    dispatcher,
                 ):
-                    await self._edit_message(room_id, placeholder_id, buffer)
-                    self.log.info(
-                        f"stream edit @ {len(buffer)} chars for {room_id[:25]}"
-                    )
-                    last_edit_t = now
-                    last_edit_len = len(buffer)
+                    if kind == "text":
+                        buffer += payload
+                    elif kind == "tool":
+                        # Indicateur visuel pendant l'exécution du tool
+                        self.log.info(f"tool_use: {payload}")
+                        marker = (
+                            f"\n\n_🔍 Consultation : {payload}…_\n\n"
+                            if buffer
+                            else f"_🔍 Consultation : {payload}…_\n\n"
+                        )
+                        await self._edit_message(
+                            room_id, placeholder_id, buffer + marker
+                        )
+                        last_edit_t = time.monotonic()
+                        last_edit_len = len(buffer)
+                        continue
+                    elif kind == "done":
+                        usage = u or {}
+                        break
+
+                    # Throttle (text mode)
+                    now = time.monotonic()
+                    if buffer and (
+                        now - last_edit_t >= self.STREAM_EDIT_INTERVAL
+                        or len(buffer) - last_edit_len >= self.STREAM_EDIT_DELTA
+                    ):
+                        await self._edit_message(room_id, placeholder_id, buffer)
+                        last_edit_t = now
+                        last_edit_len = len(buffer)
+            else:
+                async for chunk, u in llm.stream_call(
+                    self.row,
+                    history,
+                    MAX_HISTORY,
+                    system_override=system_override,
+                ):
+                    if chunk:
+                        buffer += chunk
+                    if u is not None:
+                        usage = u
+                    now = time.monotonic()
+                    if buffer and (
+                        now - last_edit_t >= self.STREAM_EDIT_INTERVAL
+                        or len(buffer) - last_edit_len >= self.STREAM_EDIT_DELTA
+                    ):
+                        await self._edit_message(room_id, placeholder_id, buffer)
+                        self.log.info(
+                            f"stream edit @ {len(buffer)} chars for {room_id[:25]}"
+                        )
+                        last_edit_t = now
+                        last_edit_len = len(buffer)
         except Exception as e:
             self.log.error(f"Streaming LLM ({self.row.provider}) : {e}")
             # Fallback : édit avec un message d'erreur si on n'a rien streamé
@@ -310,9 +392,14 @@ class AgentRunner:
         usage = {}
         err = None
         try:
-            # Streaming : place un placeholder, édite progressivement.
-            # Le fallback non-streaming est géré dans ask_llm_streaming.
-            answer, usage = await self.ask_llm_streaming(room.room_id, body)
+            # Streaming + RAG : si la room est liée à un cours Moodle avec
+            # reindexEnabled, on retrieve d'abord les chunks pertinents.
+            answer, usage = await self.ask_llm_streaming(
+                room.room_id,
+                body,
+                course_db_id=ra.get("moodleCourseId"),
+                rag_enabled=bool(ra.get("rag_enabled")),
+            )
         except Exception as e:
             err = str(e)
             answer = "❌ Désolé, je rencontre un problème technique."
@@ -432,9 +519,7 @@ async def _stop_runner(runner: "AgentRunner", task: asyncio.Task) -> None:
             pass
 
 
-# Champs de config qu'on peut hot-reload sans relancer la session Matrix.
-# Tout le reste (slug, matrixUserId, accessToken, deviceId) nécessiterait un
-# restart complet du runner — rare en pratique (changement après création).
+# Champs hot-reloadables sans relancer la session Matrix (juste swap row).
 _HOT_RELOAD_FIELDS = (
     "system_prompt",
     "model",
@@ -444,9 +529,22 @@ _HOT_RELOAD_FIELDS = (
     "name",
 )
 
+# Champs qui IMPOSENT un restart du runner (nouvelle session Matrix). Ces
+# champs changent typiquement lors d'un rotateAgentToken — le nouveau
+# accessToken invalide l'ancien côté Synapse, le runner doit réinitialiser
+# sa session matrix-nio avec les nouvelles creds.
+_RESTART_FIELDS = (
+    "matrix_access_token_enc",
+    "matrix_device_id",
+)
+
 
 def _config_changed(old: db.AgentRow, new: db.AgentRow) -> list[str]:
     return [f for f in _HOT_RELOAD_FIELDS if getattr(old, f) != getattr(new, f)]
+
+
+def _credentials_changed(old: db.AgentRow, new: db.AgentRow) -> list[str]:
+    return [f for f in _RESTART_FIELDS if getattr(old, f) != getattr(new, f)]
 
 
 async def reconcile_runners(
@@ -482,11 +580,28 @@ async def reconcile_runners(
             runners[agent.id] = (runner, task)
             continue
 
-        # 4. Hot-reload de config — si systemPrompt, model, temp, etc. ont
+        # 4. Detect credential change (rotateAgentToken) → full restart.
+        # Le nouveau accessToken a invalidé l'ancien côté Synapse, donc le
+        # runner courant va commencer à recevoir des 401. On stoppe + redémarre
+        # avec les nouvelles creds — la nouvelle session Matrix uploadera le
+        # nouveau device_keys, ce qui débloque la signature côté UI.
+        runner, task = runners[agent.id]
+        cred_diff = _credentials_changed(runner.row, agent)
+        if cred_diff:
+            log.info(
+                f"🔄 Restart runner {agent.slug} — credentials changés "
+                f"({', '.join(cred_diff)}). L'ancienne session Matrix est invalidée."
+            )
+            await _stop_runner(runner, task)
+            new_runner = AgentRunner(agent)
+            new_task = asyncio.create_task(new_runner.run(), name=agent.slug)
+            runners[agent.id] = (new_runner, new_task)
+            continue
+
+        # 5. Hot-reload de config — si systemPrompt, model, temp, etc. ont
         # changé en DB, on swap le row in-place sans tuer la session Matrix.
         # Le prochain message utilisera la nouvelle config. L'historique de
         # conversation est préservé (utile pour ne pas perturber l'utilisateur).
-        runner, _ = runners[agent.id]
         diff = _config_changed(runner.row, agent)
         if diff:
             log.info(

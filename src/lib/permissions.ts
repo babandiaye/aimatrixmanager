@@ -1,23 +1,31 @@
 import type { UserRole } from "@prisma/client";
 
-// Liste exhaustive des actions du système. Étendre ici quand on ajoute une feature.
+// Liste exhaustive des actions du système.
+// Convention : les permissions sans suffixe = portée globale (ADMIN/MANAGER).
+// Les permissions `.own` = portée propriétaire (ENSEIGNANT sur ses propres
+// entités : agents qu'il a créés, cours où il enseigne sur Moodle).
 export type Permission =
   // Plateforme / config système
   | "users.manage"
   | "settings.manage"
-  // Plateformes Moodle (CRUD = ADMIN seul, view = tous)
+  // Plateformes Moodle (CRUD = ADMIN seul, view = MANAGER/AUDITOR)
   | "moodle.create"
   | "moodle.update"
   | "moodle.delete"
   | "moodle.view"
-  // Agents IA
+  // Agents IA — portée globale ou propriétaire (ENSEIGNANT)
   | "agents.create"
   | "agents.update"
+  | "agents.update-own"
   | "agents.delete"
+  | "agents.delete-own"
   | "agents.view"
+  | "agents.view-own"
   // Affectations agent ↔ salon
   | "rooms.assign"
+  | "rooms.assign-own"
   | "rooms.view"
+  | "rooms.view-own"
   // Knowledge base RAG
   | "kb.write"
   | "kb.view"
@@ -33,6 +41,18 @@ const MANAGER_PERMS: ReadonlySet<Permission> = new Set([
   "audit.view",
 ]);
 
+// ENSEIGNANT : peut créer ses propres agents et les affecter à ses cours.
+// Pas d'accès aux plateformes Moodle (config admin), pas aux autres users.
+const ENSEIGNANT_PERMS: ReadonlySet<Permission> = new Set([
+  "agents.create",
+  "agents.update-own",
+  "agents.delete-own",
+  "agents.view-own",
+  "rooms.assign-own",
+  "rooms.view-own",
+  "kb.view",
+]);
+
 const AUDITOR_PERMS: ReadonlySet<Permission> = new Set([
   "moodle.view",
   "agents.view",
@@ -44,8 +64,16 @@ const AUDITOR_PERMS: ReadonlySet<Permission> = new Set([
 export function can(role: UserRole, perm: Permission): boolean {
   if (role === "ADMIN") return true;
   if (role === "MANAGER") return MANAGER_PERMS.has(perm);
+  if (role === "ENSEIGNANT") return ENSEIGNANT_PERMS.has(perm);
   if (role === "AUDITOR") return AUDITOR_PERMS.has(perm);
   return false;
+}
+
+// Helper "ou-bien" : retourne true si l'utilisateur a au moins une des
+// permissions listées. Utile pour les vérifs "peut voir tout OU peut voir ses
+// propres" sur un endpoint commun.
+export function canAny(role: UserRole, ...perms: Permission[]): boolean {
+  return perms.some((p) => can(role, p));
 }
 
 // Helper pour Server Components / API routes : jette si non autorisé
@@ -57,11 +85,12 @@ export function assertCan(role: UserRole, perm: Permission): void {
 
 /**
  * Filtre Prisma à appliquer sur la table Room selon le rôle.
- * Seul ADMIN voit tous les salons. Les autres rôles ne voient que les salons
- * provenant de Moodle (créés via le plugin mod_matrix), pas ceux créés
- * nativement depuis un client Matrix (Element, formation1-chat.unchk.sn…).
+ * Note : pour ENSEIGNANT, le filtrage par "ses cours" se fait dans
+ * teacher-scope.ts (il faut résoudre ses cours Moodle via WS d'abord).
  */
 export function roomScopeFor(role: UserRole) {
   if (role === "ADMIN") return {};
+  // MANAGER / AUDITOR : seulement les salons venant de Moodle (par défaut)
+  // ENSEIGNANT : géré dans teacher-scope (filtre supplémentaire par courseId)
   return { source: "MOODLE" } as const;
 }

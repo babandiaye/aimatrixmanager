@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { roomScopeFor } from "@/lib/permissions";
+import {
+  agentWhereFor,
+  resolveTeacherCourseIds,
+  roomWhereForTeacher,
+} from "@/lib/teacher-scope";
 import { getSystemHealth, type HealthItem } from "@/lib/health";
 import {
   Card,
@@ -25,7 +29,13 @@ export default async function DashboardPage() {
   const session = await auth();
   if (!session?.user) return null;
 
-  const scope = roomScopeFor(session.user.role);
+  const teacherCourseIds =
+    session.user.role === "ENSEIGNANT"
+      ? await resolveTeacherCourseIds(session.user.id)
+      : null;
+  const agentWhere = agentWhereFor(session.user.role, session.user.id);
+  const roomWhere = roomWhereForTeacher(session.user.role, teacherCourseIds);
+
   const [
     agentTotal,
     agentEnabled,
@@ -35,14 +45,16 @@ export default async function DashboardPage() {
     courseTotal,
     health,
   ] = await Promise.all([
-    prisma.agent.count(),
-    prisma.agent.count({ where: { status: "ENABLED" } }),
-    prisma.room.count({ where: scope }),
+    prisma.agent.count({ where: agentWhere }),
+    prisma.agent.count({ where: { ...agentWhere, status: "ENABLED" } }),
+    prisma.room.count({ where: roomWhere }),
     prisma.roomAgent.count({
-      where: { enabled: true, room: scope },
+      where: { enabled: true, room: roomWhere },
     }),
     prisma.moodlePlatform.count({ where: { enabled: true } }),
-    prisma.moodleCourse.count(),
+    session.user.role === "ENSEIGNANT"
+      ? (teacherCourseIds?.length ?? 0)
+      : prisma.moodleCourse.count(),
     getSystemHealth(),
   ]);
 

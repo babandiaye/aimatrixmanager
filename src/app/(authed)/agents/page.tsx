@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
-import { can } from "@/lib/permissions";
+import { can, canAny } from "@/lib/permissions";
+import { agentWhereFor } from "@/lib/teacher-scope";
 import { prisma } from "@/lib/prisma";
 import {
   Card,
@@ -37,18 +38,22 @@ export default async function AgentsPage({
 }) {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  if (!can(session.user.role, "agents.view")) redirect("/");
+  if (!canAny(session.user.role, "agents.view", "agents.view-own")) redirect("/");
 
   const canCreate = can(session.user.role, "agents.create");
-  const canUpdate = can(session.user.role, "agents.update");
-  const canDelete = can(session.user.role, "agents.delete");
+  // ENSEIGNANT a .update-own / .delete-own — on autorise les actions inline,
+  // le ownership précis est revérifié dans les server actions.
+  const canUpdate = canAny(session.user.role, "agents.update", "agents.update-own");
+  const canDelete = canAny(session.user.role, "agents.delete", "agents.delete-own");
 
   const sp = await searchParams;
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
+  const where = agentWhereFor(session.user.role, session.user.id);
   const [total, agents] = await Promise.all([
-    prisma.agent.count(),
+    prisma.agent.count({ where }),
     prisma.agent.findMany({
+      where,
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,

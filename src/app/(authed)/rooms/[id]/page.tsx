@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { auth } from "@/auth";
-import { can } from "@/lib/permissions";
+import { can, canAny } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import {
   Card,
@@ -16,6 +16,7 @@ import { ChevronLeftIcon, LockClosedIcon } from "@heroicons/react/24/outline";
 import { AssignmentsManager } from "./assignments-manager";
 import { CourseLinker } from "./course-linker";
 import { AdminCard } from "./admin-card";
+import { RagIndexer } from "./rag-indexer";
 
 export default async function RoomDetailPage({
   params,
@@ -24,9 +25,16 @@ export default async function RoomDetailPage({
 }) {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  if (!can(session.user.role, "rooms.view")) redirect("/");
+  if (!canAny(session.user.role, "rooms.view", "rooms.view-own")) redirect("/");
 
-  const canAssign = can(session.user.role, "rooms.assign");
+  // canAssign : peut assigner un agent à ce salon (ENSEIGNANT sur ses rooms inclus)
+  // canAdmin  : actions strictement admin/manager (rename, encryption, link course, RAG)
+  const canAssign = canAny(
+    session.user.role,
+    "rooms.assign",
+    "rooms.assign-own",
+  );
+  const canAdmin = can(session.user.role, "rooms.assign");
 
   const { id } = await params;
   const room = await prisma.room.findUnique({
@@ -43,15 +51,58 @@ export default async function RoomDetailPage({
   });
   if (!room) notFound();
 
+  // Stats RAG si un cours est lié — comptage chunks total + embedded
+  let ragStats: {
+    totalChunks: number;
+    embeddedChunks: number;
+    reindexEnabled: boolean;
+    lastIndexedAt: Date | null;
+  } | null = null;
+  if (room.moodleCourseId) {
+    const courseDetail = await prisma.moodleCourse.findUnique({
+      where: { id: room.moodleCourseId },
+      select: { reindexEnabled: true, lastIndexedAt: true },
+    });
+    const total = await prisma.moodleResourceChunk.count({
+      where: { courseId: room.moodleCourseId },
+    });
+    const embedded = await prisma.$queryRaw<{ c: bigint }[]>`
+      SELECT COUNT(*)::bigint AS c FROM "MoodleResourceChunk"
+      WHERE "courseId" = ${room.moodleCourseId} AND embedding IS NOT NULL
+    `;
+    ragStats = {
+      totalChunks: total,
+      embeddedChunks: Number(embedded[0]?.c ?? 0),
+      reindexEnabled: courseDetail?.reindexEnabled ?? false,
+      lastIndexedAt: courseDetail?.lastIndexedAt ?? null,
+    };
+  }
+
   // Non-ADMIN : ne voit que les salons provenant de Moodle. On répond 404
   // (pas 403) pour ne pas révéler l'existence des salons natifs.
   if (session.user.role !== "ADMIN" && room.source !== "MOODLE") {
     notFound();
   }
+  // ENSEIGNANT : vérifie que le salon est dans ses cours
+  if (session.user.role === "ENSEIGNANT") {
+    const { resolveTeacherCourseIds } = await import("@/lib/teacher-scope");
+    const teacherCourseIds = await resolveTeacherCourseIds(session.user.id);
+    if (
+      !room.moodleCourseId ||
+      !teacherCourseIds.includes(room.moodleCourseId)
+    ) {
+      notFound();
+    }
+  }
 
-  // Listes pour les selectors
+  // Listes pour les selectors — ENSEIGNANT ne voit que ses propres agents
   const allAgents = await prisma.agent.findMany({
-    where: { status: { not: "SUSPENDED" } },
+    where: {
+      status: { not: "SUSPENDED" },
+      ...(session.user.role === "ENSEIGNANT"
+        ? { createdById: session.user.id }
+        : {}),
+    },
     select: { id: true, slug: true, name: true, status: true },
     orderBy: { slug: "asc" },
   });
@@ -124,7 +175,7 @@ export default async function RoomDetailPage({
         </CardContent>
       </Card>
 
-      {canAssign && (
+      {canAdmin && (
         <AdminCard
           roomId={room.id}
           matrixRoomId={room.matrixRoomId}
@@ -161,7 +212,7 @@ export default async function RoomDetailPage({
           <CardTitle>Cours Moodle lié</CardTitle>
           <CardDescription>
             Permet d&apos;injecter le contexte du cours dans les réponses de
-            l&apos;agent (RAG, Phase 8).
+            l&apos;agent (RAG).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -179,10 +230,35 @@ export default async function RoomDetailPage({
               id: c.id,
               label: `[${c.platform.key}] ${c.shortname} — ${c.fullname}`,
             }))}
-            canAssign={canAssign}
+            canAssign={canAdmin}
           />
         </CardContent>
       </Card>
+
+      {room.moodleCourseId && room.moodleCourse && ragStats && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Indexation RAG du cours</CardTitle>
+            <CardDescription>
+              Extrait le texte des supports Moodle (PDF, pages, labels),
+              découpe en chunks et calcule les embeddings via{" "}
+              <code>nomic-embed-text</code> sur fromager. Les agents affectés
+              à ce salon utilisent ces chunks pour répondre avec le contexte
+              du cours.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <RagIndexer
+              courseDbId={room.moodleCourseId}
+              reindexEnabled={ragStats.reindexEnabled}
+              totalChunks={ragStats.totalChunks}
+              embeddedChunks={ragStats.embeddedChunks}
+              lastIndexedAt={ragStats.lastIndexedAt}
+              canIndex={canAdmin}
+            />
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

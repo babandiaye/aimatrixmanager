@@ -26,6 +26,9 @@ import { PlatformActions } from "./platform-actions";
 export default async function MoodlePlatformsPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
+  // ENSEIGNANT n'a pas accès à la config des plateformes Moodle — il manage
+  // juste ses agents. Redirection silencieuse vers /agents.
+  if (session.user.role === "ENSEIGNANT") redirect("/agents");
   if (!can(session.user.role, "moodle.view")) redirect("/");
 
   const canCreate = can(session.user.role, "moodle.create");
