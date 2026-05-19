@@ -132,54 +132,137 @@ export async function extractCourseContents(
  * Indexe une resource selon son modname. Renvoie le nb de chunks créés ou
  * "skipped" si la resource n'a pas de contenu indexable.
  */
+type ResourceFile = {
+  fileurl: string;
+  filename: string;
+  mimetype: string | null;
+  filesize: number | null;
+  contenthash: string | null;
+};
+
+function parseFiles(raw: unknown): ResourceFile[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (f): f is ResourceFile =>
+      f &&
+      typeof f === "object" &&
+      typeof (f as ResourceFile).fileurl === "string" &&
+      typeof (f as ResourceFile).filename === "string",
+  );
+}
+
+/**
+ * Download + extract texte d'un fichier unique. Renvoie le texte ou null
+ * en cas de format non supporté. Throw sur erreur réseau / extraction.
+ */
+async function downloadAndExtract(
+  file: { fileurl: string; mimetype: string | null; filename: string; filesize: number | null },
+  wsToken: string,
+): Promise<{ text: string; hash: string } | null> {
+  if (file.filesize && file.filesize > MAX_FILE_SIZE) {
+    throw new Error(
+      `Fichier trop volumineux (${(file.filesize / 1024 / 1024).toFixed(1)} MB > 50 MB)`,
+    );
+  }
+  const sep = file.fileurl.includes("?") ? "&" : "?";
+  const url = `${file.fileurl}${sep}token=${wsToken}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Download HTTP ${res.status} for ${file.filename}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  const hash = sha1Hex(buf);
+
+  // Pour les HTMLs (book chapters), mimetype peut être absent — on infère
+  // depuis l'extension du filename si besoin.
+  const mt =
+    file.mimetype ||
+    (file.filename.endsWith(".html") || file.filename.endsWith(".htm")
+      ? "text/html"
+      : "");
+
+  try {
+    const text = await extractText(buf, mt);
+    return { text, hash };
+  } catch (e) {
+    if (e instanceof UnsupportedFormatError) return null;
+    throw e;
+  }
+}
+
 async function indexResource(
   resource: MoodleResource,
   wsToken: string,
 ): Promise<number | "skipped"> {
   let text = "";
 
+  const filesList = parseFiles(resource.files);
+
   if (
-    (resource.modname === "resource" || resource.modname === "folder") &&
-    resource.fileurl
+    (resource.modname === "resource" ||
+      resource.modname === "folder" ||
+      resource.modname === "book") &&
+    (resource.fileurl || filesList.length > 0)
   ) {
-    // Download + SHA1 + extract
-    if (resource.filesize && resource.filesize > MAX_FILE_SIZE) {
-      throw new Error(
-        `Fichier trop volumineux (${(resource.filesize / 1024 / 1024).toFixed(1)} MB > 50 MB), skip`,
-      );
-    }
+    // Multi-fichiers : on télécharge tout et on concatène. Pour un mod_book,
+    // chaque "fichier" est un chapitre HTML. Pour un folder, ce sont les
+    // fichiers du dossier. Pour resource (1 fichier), filesList = [le fichier].
+    const filesToFetch: ResourceFile[] =
+      filesList.length > 0
+        ? filesList
+        : [
+            {
+              fileurl: resource.fileurl!,
+              filename: resource.filename ?? "file",
+              mimetype: resource.mimetype,
+              filesize: resource.filesize,
+              contenthash: resource.contenthash,
+            },
+          ];
 
-    const sep = resource.fileurl.includes("?") ? "&" : "?";
-    const url = `${resource.fileurl}${sep}token=${wsToken}`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`Download HTTP ${res.status}`);
-    }
-    const buf = Buffer.from(await res.arrayBuffer());
-    const hash = sha1Hex(buf);
-
-    try {
-      text = await extractText(buf, resource.mimetype || "");
-    } catch (e) {
-      if (e instanceof UnsupportedFormatError) {
-        // On stocke le hash pour la dédup future, mais pas de texte → skip
-        await prisma.moodleResource.update({
-          where: { id: resource.id },
-          data: {
-            contenthash: hash,
-            syncError: `Format non supporté: ${resource.mimetype}`,
-          },
-        });
-        return "skipped";
+    const parts: string[] = [];
+    let lastHash: string | null = null;
+    for (const f of filesToFetch) {
+      // mod_book : le 1er entry est souvent "structure" (TOC JSON) — skip si
+      // mimetype JSON ou filename "structure"
+      if (
+        resource.modname === "book" &&
+        (f.filename === "structure" || (f.mimetype || "").includes("json"))
+      ) {
+        continue;
       }
-      throw e;
+      const r = await downloadAndExtract(
+        {
+          fileurl: f.fileurl,
+          filename: f.filename,
+          mimetype: f.mimetype,
+          filesize: f.filesize,
+        },
+        wsToken,
+      );
+      if (!r) continue; // format non supporté → skip ce fichier seulement
+      if (r.text && r.text.trim().length > 0) {
+        // Préfixe avec le filename pour aider la traçabilité dans les chunks
+        parts.push(`# ${f.filename}\n\n${r.text}`);
+      }
+      lastHash = r.hash;
     }
 
-    // Persiste hash + texte avant le chunking
+    if (parts.length === 0) {
+      await prisma.moodleResource.update({
+        where: { id: resource.id },
+        data: {
+          syncError: `Aucun fichier exploitable (${filesToFetch.length} tentés)`,
+        },
+      });
+      return "skipped";
+    }
+
+    text = parts.join("\n\n---\n\n");
     await prisma.moodleResource.update({
       where: { id: resource.id },
       data: {
-        contenthash: hash,
+        contenthash: lastHash,
         extractedText: text,
         textExtractedAt: new Date(),
         syncError: null,

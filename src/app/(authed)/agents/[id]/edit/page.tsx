@@ -1,6 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { auth } from "@/auth";
-import { can } from "@/lib/permissions";
+import { canAny } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
 import {
@@ -19,11 +19,24 @@ export default async function EditAgentPage({
 }) {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  if (!can(session.user.role, "agents.update")) redirect("/agents");
+  // ENSEIGNANT a agents.update-own (et seulement sur ses propres agents).
+  // L'ownership précis est revérifié dans les server actions via
+  // assertAgentEditable. Ici on filtre déjà l'accès à la page.
+  if (!canAny(session.user.role, "agents.update", "agents.update-own")) {
+    redirect("/agents");
+  }
 
   const { id } = await params;
   const agent = await prisma.agent.findUnique({ where: { id } });
   if (!agent) notFound();
+
+  // ENSEIGNANT : ne peut ouvrir l'édition que de ses propres agents
+  if (
+    session.user.role === "ENSEIGNANT" &&
+    agent.createdById !== session.user.id
+  ) {
+    redirect("/agents");
+  }
 
   const serverName = process.env.MATRIX_SERVER_NAME ?? "matrix.example.com";
   const ollamaEnabled = isOllamaConfigured();

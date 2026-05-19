@@ -109,7 +109,27 @@ export default async function RoomDetailPage({
   const assignedAgentIds = new Set(room.assignments.map((a) => a.agentId));
   const availableAgents = allAgents.filter((a) => !assignedAgentIds.has(a.id));
 
+  // CourseLinker : on ne propose QUE les cours qui ont au moins une activité
+  // mod_matrix synchronisée — avant on proposait TOUS les cours (centaines
+  // pour P12SEJA) et un admin pouvait lier la room à un cours sans rapport,
+  // ce qui faisait disparaître la room du scope ENSEIGNANT légitime.
+  //
+  // Le cours actuellement lié est inclus quoi qu'il arrive, pour qu'on
+  // puisse le voir et le délier même si l'activité a disparu côté Moodle.
+  const matrixActivities = await prisma.moodleMatrixActivity.findMany({
+    select: { platformId: true, moodleCourseId: true },
+    distinct: ["platformId", "moodleCourseId"],
+  });
   const allCourses = await prisma.moodleCourse.findMany({
+    where: {
+      OR: [
+        ...matrixActivities.map((a) => ({
+          platformId: a.platformId,
+          moodleId: a.moodleCourseId,
+        })),
+        ...(room.moodleCourseId ? [{ id: room.moodleCourseId }] : []),
+      ],
+    },
     include: { platform: { select: { key: true } } },
     orderBy: [{ platform: { key: "asc" } }, { shortname: "asc" }],
   });

@@ -74,8 +74,11 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 | ioredis | 5.x | Client Redis |
 | Pino | 10.x | Logs structurés (avec redaction des secrets) |
 | node-cron | 4.x | Tâches planifiées |
-| NextAuth (Auth.js) | 5.0-beta | Auth Credentials + Keycloak OIDC |
-| `@anthropic-ai/sdk` | 0.91+ | Claude API |
+| BullMQ | 5.x | File de jobs (pipeline d'indexation RAG en arrière-plan) |
+| NextAuth (Auth.js) | 5.0-beta | Auth **Keycloak OIDC unique** |
+| `@anthropic-ai/sdk` | 0.91+ | Claude API (function calling pour RAG tool-mode) |
+| Ollama (compat OpenAI) | — | Serveur d'embeddings `nomic-embed-text` 768d + LLM (Gemma 3/4) |
+| `matrix-nio` (Python) | 0.25+ | Client Matrix E2EE du runtime bot |
 | Synapse Admin API | v1/v2 | Provisioning des comptes Matrix |
 | Moodle Web Services | REST | Sync cours, ressources |
 | pnpm | 10.33+ | Package manager |
@@ -98,9 +101,11 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 - **Compte Synapse admin** avec un access token dédié (utilisé pour provisionner les agents)
 - **Moodle 4.x** avec **Web Services activés** et un **service externe** créé pour aibotmanager (cf. section [Moodle — service Web Services](#moodle--service-web-services) plus bas)
 - **Plugin [`mod_matrix` (Famedly)](https://github.com/element-hq/moodle-mod_matrix)** installé sur chaque Moodle, si on veut détecter les activités Matrix créées depuis les cours
-- **Clé API Anthropic** (`ANTHROPIC_API_KEY`)
-- **Serveur d'embeddings** compatible OpenAI servant un modèle (recommandé : `nomic-embed-text` 768-dim sur Ollama avec GPU)
-- **Realm Keycloak** (optionnel) avec un client OIDC dont le `redirect URI` pointe vers `<base-url>/api/auth/callback/keycloak`
+- **Realm Keycloak** **obligatoire** avec un client OIDC dont le `redirect URI` pointe vers `<base-url>/api/auth/callback/keycloak` (provider unique : pas de fallback credentials)
+- **Clé API Anthropic** (`ANTHROPIC_API_KEY`) — provider LLM principal, requis pour le mode tool-calling RAG
+- **Serveur Ollama (compat OpenAI)** — requis pour :
+  - les **embeddings** RAG (recommandé : `nomic-embed-text` 768-dim sur GPU)
+  - optionnellement un **LLM secondaire** (ex. `gemma3:12b`) sélectionnable au niveau de l'agent
 
 ### Moodle — service Web Services
 
@@ -221,16 +226,23 @@ AUTH_SECRET=""                # openssl rand -base64 32
 AUTH_TRUST_HOST="true"
 NEXTAUTH_URL="https://ai.example.com"   # prod uniquement
 
-# ─── Admin initial (utilisé par `pnpm db:seed` uniquement) ──────
+# ─── Admin initial (legacy — provider Credentials supprimé) ─────
+# Le seed crée encore un compte ADMIN avec ces valeurs, mais comme
+# l'auth est Keycloak-only ce compte ne peut pas se logger via /login.
+# Le bootstrap normal est : 1er user Keycloak → promu ADMIN auto.
+# Garde ces vars si tu veux pré-créer un ADMIN avec un email Keycloak
+# spécifique avant qu'il se connecte (le compte sera ensuite lié au
+# moment du 1er SSO grâce à `allowDangerousEmailAccountLinking`).
 ADMIN_INITIAL_EMAIL="admin@example.com"
 ADMIN_INITIAL_PASSWORD="ChangeMeNow!"
 
-# ─── Keycloak (vide = désactivé, fallback credentials) ──────────
+# ─── Keycloak (OBLIGATOIRE — provider unique) ───────────────────
 KEYCLOAK_ISSUER="https://keycloak.example.com/realms/EXAMPLE"
 KEYCLOAK_CLIENT_ID="aibotmanager"
 KEYCLOAK_CLIENT_SECRET=""
 
 # ─── Redis ──────────────────────────────────────────────────────
+# Sert au cache, au rate-limit ET à BullMQ (queue d'indexation RAG).
 REDIS_URL="redis://127.0.0.1:6379"
 
 # ─── Logs ───────────────────────────────────────────────────────
@@ -244,8 +256,16 @@ SYNAPSE_ADMIN_TOKEN=""
 # ─── Chiffrement secrets DB (AES-256-GCM, NE JAMAIS PERDRE) ─────
 WS_TOKEN_ENCRYPTION_KEY=""    # openssl rand -base64 32
 
-# ─── Anthropic ──────────────────────────────────────────────────
+# ─── Anthropic (LLM principal + RAG tool-mode) ──────────────────
 ANTHROPIC_API_KEY=""
+
+# ─── Ollama (embeddings + LLM secondaire) ───────────────────────
+# Endpoint compat OpenAI. Requis pour le RAG (embeddings) et utilisé
+# en mode naïf pour les agents Ollama. Absent = état "warn" dans le
+# dashboard "État des services" et indexation RAG impossible.
+OLLAMA_BASE_URL="https://fromager.example.com"
+OLLAMA_API_KEY=""
+OLLAMA_EMBED_MODEL="nomic-embed-text"     # défaut, peut être omis
 ```
 
 > ⚠️ **`WS_TOKEN_ENCRYPTION_KEY`** chiffre les `wsToken` Moodle et les `matrixAccessToken` des agents. Si tu la perds, tous ces secrets stockés sont irrécupérables (à re-saisir manuellement). Sauvegarde-la dans un coffre-fort dès la mise en prod.
@@ -366,27 +386,42 @@ Le **bot Python** ([`bot/`](bot/) dans ce repo) est le runtime qui fait tourner 
 2. **DM** (≤ 2 membres) → toujours répondre
 3. **Groupe** → mention de l'agent requise (slug, MXID, displayname, `m.mentions`, pill)
 4. La mention est strippée du body
-5. Appel Claude avec le `systemPrompt`, `model`, `maxTokens`, `temperature` propres à l'agent
-6. Réponse envoyée (avec partage de session Megolm si E2EE)
-7. Insert dans `AuditLog` : tokens, latence, erreur éventuelle
+5. **Phase « réflexion »** : un placeholder `💭 Réfléchit . . .` est envoyé avec :
+   - une **animation interne** qui cycle l'emoji et les points toutes les ~650 ms (effet « pulse »)
+   - l'**indicateur natif Matrix** `room_typing` (Element affiche « X écrit… » avec 3 points animés en bas du salon)
+6. **Routage RAG** (si le salon est lié à un `MoodleCourse` avec `reindexEnabled`) :
+   - provider `ANTHROPIC` → **tool-mode** : Claude appelle dynamiquement `search_course` / `get_chapter`
+   - provider `OLLAMA` → **RAG naïf** : top-K chunks injectés dans le system prompt
+   - sinon → mode standard sans contexte
+7. Appel LLM en **streaming** : tokens éditent le placeholder au fil de l'arrivée (throttle 400 ms / 25 chars)
+8. À la fin du stream : typing indicator coupé, message final consolidé
+9. Insert dans `AuditLog` : tokens, latence, erreur éventuelle
 
 **Cycle de vie côté UI** :
 
 | Action | Conséquence côté Matrix |
 |---|---|
 | Création d'un agent (`/agents/new`) | Compte Matrix provisionné via Synapse Admin API + client login → access_token + device_id chiffrés en DB |
-| Statut `ENABLED` | Sera lancé au prochain démarrage du bot Python |
+| Statut `ENABLED` | Le bot **détecte automatiquement** le nouvel agent et le lance (reconcile loop, voir ci-dessous) |
 | Assignation à une room (`/rooms/[id]`) | `joinUserToRoom` admin force le bot à rejoindre |
 | Désassignation | Le bot quitte la room avec son propre token |
-| Bouton « Régénérer token » | Reset password admin → client login → nouveau token + device |
+| Bouton « Régénérer token » | Reset password admin → client login → nouveau token + device — pris en compte au prochain tick reconcile |
 
-**Le bot doit être redémarré** après modification de la liste des agents `ENABLED` (la lecture DB est faite uniquement au boot pour le moment) :
+### Hot-reload — pas besoin de redémarrer
+
+Le bot embarque une **reconcile loop** ([bot/main.py](bot/main.py)) qui re-scanne la table `Agent` à intervalle régulier et :
+- spawn un runner pour tout nouvel agent `ENABLED`
+- arrête proprement les runners dont l'agent est passé à `DISABLED`
+- swappe les champs hot-reloadables (`systemPrompt`, `model`, `temperature`, `maxTokens`, `displayName`) sans relancer la session Matrix
+- recrée le client si le `matrixAccessToken` a été régénéré (rotation de token)
+
+Chaque agent envoie aussi un **heartbeat** dans `Agent.lastHeartbeatAt` (sert au check « Bot multi-agents » du dashboard `/health`).
+
+Un redémarrage manuel (`sudo docker restart bot-ia`) n'est nécessaire qu'après une modif du **code Python** :
 
 ```bash
-sudo docker restart bot-ia
+cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
 ```
-
-Phase suivante envisagée : un signal SIGHUP ou un canal Redis pub/sub pour reconfigurer à chaud.
 
 ---
 
@@ -395,7 +430,7 @@ Phase suivante envisagée : un signal SIGHUP ou un canal Redis pub/sub pour reco
 ### Première mise en service (admin)
 
 ```
-1. Login (Keycloak ou local)
+1. Login Keycloak (le tout premier user est promu ADMIN automatiquement)
 2. /moodle → ajouter une plateforme (clé + URL + token WS)
    → cf. section Moodle — service Web Services pour les fonctions à activer
 3. /moodle → bouton 🔄 → sync des cours dans MoodleCourse
@@ -403,11 +438,15 @@ Phase suivante envisagée : un signal SIGHUP ou un canal Redis pub/sub pour reco
    → importe les MoodleMatrixActivity + lie les Room ↔ MoodleCourse
 5. /rooms → bouton « Synchroniser depuis Synapse » (découvre toutes les rooms)
 6. /agents → créer un agent (slug, prompt, modèle) → ENABLED
+   → le bot Python le détecte tout seul (reconcile loop, pas de restart)
 7. /rooms/[id] → assigner l'agent + lier au cours Moodle si non auto-lié
-8. /rooms/[id] → activer l'indexation RAG (Phase 11)
-9. Redémarrer le bot Python : sudo docker restart bot-ia
-10. Élève écrit `@<slug> bonjour ...` dans Element → l'agent répond
-11. /audit → contrôle pédagogique des conversations
+   → la liste de cours proposée est filtrée aux cours ayant ≥ 1 activité
+     mod_matrix (et une confirmation avant lien)
+8. /rooms/[id] → activer l'indexation RAG → un job BullMQ tourne en arrière-plan
+9. Élève écrit `@<slug> bonjour ...` dans Element → l'agent répond
+10. /audit → contrôle pédagogique des conversations
+11. /health → dashboard "État des services" (Postgres, Redis, Synapse,
+    bot multi-agents, Ollama, plateformes Moodle)
 ```
 
 ### Flow ENSEIGNANT (auto-service)
@@ -418,9 +457,11 @@ Phase suivante envisagée : un signal SIGHUP ou un canal Redis pub/sub pour reco
 3. /mes-cours → résolution auto via WS (cache 1h)
    → liste les cours où il est editingteacher/teacher
 4. /agents/new → crée son propre agent IA (slug, prompt, modèle)
-5. /rooms → voit uniquement les salons Moodle de ses cours
-6. /rooms/[id] → assigne son agent au salon (sélecteur scopé à ses agents)
-7. Le bot répond aux mentions dans le salon une fois redémarré
+5. /agents/[id]/edit → peut modifier ses propres agents (canAny "agents.update-own")
+6. /rooms → voit uniquement les salons Moodle de ses cours
+7. /rooms/[id] → assigne son agent au salon (sélecteur scopé à ses agents)
+8. Le bot répond aux mentions dans le salon — pas de redémarrage requis,
+   le reconcile loop prend la nouvelle assignation au tick suivant
 ```
 
 ### Cycle de mise à jour code
@@ -433,7 +474,8 @@ pnpm exec prisma generate
 pnpm db:push                     # si le schéma a changé
 pnpm build
 sudo systemctl restart aimatrixmanager
-# Si bot Python touché :
+# Uniquement si le code Python du bot a changé (pas pour un nouvel
+# agent / un changement de prompt — ça, c'est hot-rechargé tout seul) :
 cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
 ```
 
@@ -515,29 +557,27 @@ Implémentation : [src/lib/permissions.ts](src/lib/permissions.ts)
 
 ## Authentification
 
-Deux providers, pilotage hybride env + DB :
+**Provider unique : Keycloak OIDC.** Il n'y a plus de provider Credentials ni de fallback local — toutes les sessions transitent par Keycloak.
 
 ```
 Cas de figure                                      Effet
 ─────────────────────────────────────────────────  ──────────────────────────────────────
-KEYCLOAK_* vides dans .env                         Keycloak invisible (kill switch)
-KEYCLOAK_* set + toggle DB ON  (Admin /settings)   Keycloak prioritaire + credentials fallback
-KEYCLOAK_* set + toggle DB OFF                     Keycloak masqué + bloqué côté serveur
+KEYCLOAK_* set + service Keycloak joignable        Login normal
+KEYCLOAK_* manquants ou vides                      L'app ne démarre pas (fail-fast)
+Service Keycloak indispo                           /login renvoie une erreur (aucune route locale)
 ```
 
 Le **rôle est toujours rechargé depuis la DB** au login (Keycloak ne peut pas dicter de rôle).
 
-Premier login Keycloak → compte créé en DB avec rôle `AUDITOR` → un admin doit le promouvoir via `/users`.
+**Bootstrap** :
+- Le **tout premier utilisateur** qui se connecte via Keycloak est promu **ADMIN automatiquement** (cas spécial bootstrap d'une instance vide).
+- Les utilisateurs suivants sont créés avec le rôle `AUDITOR` → un ADMIN doit les promouvoir via `/users`.
 
-### Changer le mot de passe d'un user local
+`auth.config.ts` est volontairement edge-safe (pas d'import Prisma) car NextAuth charge le middleware en Edge runtime. Les callbacks DB-touchants (jwt refresh, events) sont dans `auth.ts`.
 
-```bash
-# Interactif (saisie masquée)
-pnpm user:password admin@example.com
+### Backchannel logout
 
-# Via env (pas d'historique shell)
-ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='nouveau' pnpm user:password
-```
+À la déconnexion UI, l'app appelle l'endpoint OIDC RP-Initiated Logout de Keycloak côté serveur (silent, sans suivre la redirection), puis purge la session Next. Voir [src/auth.ts](src/auth.ts).
 
 ---
 
@@ -615,10 +655,35 @@ Logs **pino** redactent automatiquement `*.password`, `*.token`, `*.access_token
   ```
   puis `sudo systemctl restart matrix-synapse`.
 
-### Bouton "Se connecter avec Keycloak" absent
-- `.env` a-t-il les 3 vars `KEYCLOAK_*` non vides ?
-- Toggle DB activé ? Voir `/settings`.
-- Le service a-t-il été redémarré après modif `.env` ?
+### Bot Matrix expulsé d'un salon (« kicked »)
+- État membre `leave` avec un `sender` ≠ MXID du bot dans les events `/messages` Synapse Admin = kick administratif.
+- Réintégration : `POST /_synapse/admin/v1/join/{roomId}` avec le `user_id` du bot (`src/lib/synapse-admin.ts::joinUserToRoom`).
+- Le reconcile loop **ne re-rejoint pas tout seul** un bot kické (par sécurité — on ne veut pas qu'un bot s'incruste après éviction).
+
+### Bot répond `❌ Désolé, je rencontre un problème technique`
+- Cause typique : Ollama renvoie une 5xx (modèle KO chargé, OOM GPU, fromager dégradé).
+- Vérifier le dashboard `/health` → carte « Ollama (fromager) » : `warn` ou `error` = problème côté serveur d'inférence.
+- Tester directement :
+  ```bash
+  curl -sH "Authorization: Bearer $OLLAMA_API_KEY" \
+       "$OLLAMA_BASE_URL/v1/models" | jq '.data | length'
+  ```
+- Solution temporaire : faire pointer l'agent sur un autre modèle (`/agents/[id]/edit`) ou un autre provider.
+
+### Indexation RAG bloquée à 0% / barre infinie sur `/rooms/[id]`
+- Vérifier l'état du worker BullMQ dans Redis :
+  ```bash
+  redis-cli LLEN bull:rag-indexer:waiting
+  redis-cli LLEN bull:rag-indexer:active
+  ```
+- Le worker est lancé via `src/instrumentation.ts` (runtime Node only) ; vérifier qu'il n'a pas crashé (`pnpm start` log).
+- Le composant `RagIndexer` ne reload la page **qu'après avoir observé la transition active → completed** dans la session courante (sinon boucle infinie, car BullMQ garde l'état `completed` 24h).
+- Pour purger un job stuck : `redis-cli DEL bull:rag-indexer:<jobId>` puis relancer depuis l'UI.
+
+### Livre Moodle (mod_book) indexé partiellement
+- Avant le patch multi-fichiers, seul le premier chapitre était extrait. Si tu vois 1 chunk pour un book de 16 chapitres :
+  - vérifier que `MoodleResource.files` (Json) est rempli pour la ressource concernée
+  - re-déclencher une réindexation complète depuis `/rooms/[id]` (bouton « Réindexer le cours »)
 
 ### `permission denied` à `pnpm build`
 - `.next/` peut hériter d'ownership root suite à un mauvais build :

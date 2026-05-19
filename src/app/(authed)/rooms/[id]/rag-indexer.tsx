@@ -36,11 +36,15 @@ export function RagIndexer({
     job?.state === "delayed";
 
   // Polling : tant qu'un job est en cours, on rafraîchit toutes les 2s.
-  // Au démarrage on fait un check unique pour reprendre l'état d'un job
-  // lancé puis page rechargée.
+  // Au reload, on ne fait PAS de window.reload() automatique si le job est
+  // déjà completed — sinon boucle infinie (BullMQ garde l'état "completed"
+  // 24h, donc à chaque mount on voyait "completed" et on reloadait).
+  // On ne déclenche le reload que si on a observé la transition
+  // active/waiting → completed au sein de la session courante.
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let wasRunning = false;
 
     const tick = async () => {
       if (cancelled) return;
@@ -53,13 +57,16 @@ export function RagIndexer({
           s.state === "waiting" ||
           s.state === "delayed";
         if (stillRunning) {
+          wasRunning = true;
           timer = setTimeout(tick, 2000);
-        } else if (s.state === "completed") {
-          // Un job vient de finir → recharger la page pour les nouveaux stats
+        } else if (s.state === "completed" && wasRunning) {
+          // On a observé la transition → reload une seule fois
+          wasRunning = false;
           window.location.reload();
         }
+        // Si completed mais !wasRunning : on est juste arrivé sur la page,
+        // pas de reload, on affiche les stats actuelles tel quel.
       } catch {
-        // Silencieux : on retentera au prochain tick
         timer = setTimeout(tick, 5000);
       }
     };

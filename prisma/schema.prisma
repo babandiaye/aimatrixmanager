@@ -406,6 +406,11 @@ model MoodleResource {
   contenthash  String?  // sha1 du fichier — clé de dédup
   fileurl      String?  // URL WS (à compléter avec ?token= au moment du download)
 
+  // Liste complète des fichiers du module (pour book/folder qui en ont plusieurs).
+  // Stocké en JSON: [{fileurl, filename, mimetype, filesize, contenthash?}, ...].
+  // Si null/absent, on retombe sur fileurl seul (modules à fichier unique).
+  files        Json?
+
   // Texte extrait — vide tant que pas indexé / si type non supporté
   extractedText String? @db.Text
 

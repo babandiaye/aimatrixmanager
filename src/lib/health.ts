@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { redis } from "@/lib/redis";
 import { getServerVersion } from "@/lib/synapse-admin";
+import { isOllamaConfigured } from "@/lib/ollama";
 
 export type HealthStatus = "ok" | "warn" | "error";
 
@@ -113,6 +114,62 @@ async function checkAgentsRuntime(): Promise<HealthItem> {
   }
 }
 
+/**
+ * Vérifie fromager (serveur Ollama) :
+ *  - endpoint /v1/models répond
+ *  - retourne le nombre de modèles dispos
+ *  - état warn si l'env n'est pas configurée (Ollama est optionnel)
+ */
+async function checkOllama(): Promise<HealthItem> {
+  if (!isOllamaConfigured()) {
+    return {
+      key: "ollama",
+      label: "Ollama (fromager)",
+      status: "warn",
+      detail: "non configuré (OLLAMA_BASE_URL/API_KEY absents)",
+    };
+  }
+  const baseUrl = process.env.OLLAMA_BASE_URL!;
+  const apiKey = process.env.OLLAMA_API_KEY!;
+  try {
+    const t0 = performance.now();
+    const res = await withTimeout(
+      fetch(`${baseUrl}/v1/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      }),
+    );
+    const ms = Math.round(performance.now() - t0);
+    if (!res.ok) {
+      return {
+        key: "ollama",
+        label: "Ollama (fromager)",
+        status: "error",
+        detail: `HTTP ${res.status} · ${ms} ms`,
+      };
+    }
+    const data = (await res.json()) as { data?: Array<{ id: string }> };
+    const count = data.data?.length ?? 0;
+    // HTTP 200 mais 0 modèle = état dégradé (Ollama backend down ou rechargé) :
+    // on flag en warn pour que le dashboard remonte clairement le problème.
+    return {
+      key: "ollama",
+      label: "Ollama (fromager)",
+      status: count === 0 ? "warn" : "ok",
+      detail:
+        count === 0
+          ? `joignable mais aucun modèle visible · ${ms} ms`
+          : `${count} modèle(s) · ${ms} ms`,
+    };
+  } catch (e) {
+    return {
+      key: "ollama",
+      label: "Ollama (fromager)",
+      status: "error",
+      detail: e instanceof Error ? e.message : "erreur",
+    };
+  }
+}
+
 async function checkMoodlePlatforms(): Promise<HealthItem> {
   try {
     const platforms = await prisma.moodlePlatform.findMany({
@@ -161,6 +218,7 @@ export async function getSystemHealth(): Promise<HealthItem[]> {
     checkRedis(),
     checkSynapse(),
     checkAgentsRuntime(),
+    checkOllama(),
     checkMoodlePlatforms(),
   ]);
 }

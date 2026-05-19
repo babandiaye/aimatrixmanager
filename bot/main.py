@@ -158,6 +158,76 @@ class AgentRunner:
     def is_dm(self, room: MatrixRoom) -> bool:
         return len(room.users) <= 2
 
+    # ── Indicateur "is typing" Matrix ────────────────────────────────────────
+    # Le client Matrix (Element, Cinny, …) anime nativement « X écrit… » avec
+    # 3 points animés. On l'active dès qu'on commence à réfléchir/streamer et
+    # on le rafraîchit toutes les ~10s pour ne pas timeout (Synapse expire le
+    # typing après 15s par défaut).
+    async def _typing_loop(self, room_id: str, stop: asyncio.Event):
+        try:
+            while not stop.is_set():
+                try:
+                    await self.client.room_typing(
+                        room_id, typing_state=True, timeout=15000
+                    )
+                except Exception as e:
+                    self.log.debug(f"room_typing: {e}")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=10)
+                    break  # stop event reçu
+                except asyncio.TimeoutError:
+                    continue  # 10s passées → on refresh le typing
+        finally:
+            # Garantie : on coupe l'indicateur quel que soit l'état de sortie
+            try:
+                await self.client.room_typing(
+                    room_id, typing_state=False, timeout=0
+                )
+            except Exception:
+                pass
+
+    # ── Animation « pulse » dans le message lui-même ────────────────────────
+    # Les emojis Matrix sont statiques : pour simuler une animation type
+    # « Claude réfléchit… qui clignote », on édite le placeholder en boucle
+    # en cyclant à travers plusieurs états (emoji + points). L'animation
+    # s'arrête dès que le premier token du LLM arrive (signalé par `stop`).
+    # Intervalle 650 ms = 1.5 edit/s → bien sous le rate-limit Synapse.
+    PULSE_FRAMES = (
+        "💭 Réfléchit",
+        "💭 Réfléchit .",
+        "💭 Réfléchit . .",
+        "💭 Réfléchit . . .",
+        "✨ Réfléchit . . .",
+        "💭 Réfléchit . .",
+        "💭 Réfléchit .",
+    )
+    PULSE_INTERVAL = 0.65
+
+    async def _pulse_loop(
+        self, room_id: str, event_id: str, stop: asyncio.Event
+    ):
+        i = 0
+        try:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        stop.wait(), timeout=self.PULSE_INTERVAL
+                    )
+                    break  # stop reçu pendant l'attente
+                except asyncio.TimeoutError:
+                    pass
+                if stop.is_set():
+                    break
+                i = (i + 1) % len(self.PULSE_FRAMES)
+                try:
+                    await self._edit_message(
+                        room_id, event_id, self.PULSE_FRAMES[i]
+                    )
+                except Exception as e:
+                    self.log.debug(f"pulse edit: {e}")
+        except Exception as e:
+            self.log.debug(f"pulse loop: {e}")
+
     # ── Envoi ─────────────────────────────────────────────────────────────────
     async def _ensure_megolm(self, room_id: str):
         """Partage la session Megolm si la room est chiffrée. No-op sinon."""
@@ -234,14 +304,47 @@ class AgentRunner:
         history = self.history.setdefault(room_id, [])
         history.append({"role": "user", "content": question})
 
-        # 1. Placeholder visible immédiatement
-        placeholder_id = await self.send(room_id, "💭 …")
+        # 0. Démarre l'indicateur « is typing » Matrix — Element anime
+        # nativement « X écrit… » avec 3 points animés. La task se coupe
+        # toujours via le `finally` en bas de la fonction.
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(
+            self._typing_loop(room_id, stop_typing)
+        )
+
+        # 1. Placeholder visible immédiatement (le texte sera remplacé par la
+        # réponse réelle au fil du streaming ; l'animation est portée par le
+        # typing indicator côté Matrix + pulse interne au message).
+        placeholder_id = await self.send(room_id, "💭 Réfléchit")
         if not placeholder_id:
             # Synapse n'a pas accepté l'envoi — on tombe en mode bloquant
+            stop_typing.set()
+            try:
+                await typing_task
+            except Exception:
+                pass
             answer, usage = await llm.call(self.row, history, MAX_HISTORY)
             await self.send(room_id, answer)
             history.append({"role": "assistant", "content": answer})
             return answer, usage
+
+        # 1.1 Démarre l'animation « pulse » dans le message lui-même.
+        # Tournera tant qu'aucun token n'est arrivé (pulse_stop.set() au
+        # premier chunk). Garantit que l'utilisateur voit que ça bosse même
+        # si le LLM met 3-5s avant le premier token (cas Ollama).
+        pulse_stop = asyncio.Event()
+        pulse_task = asyncio.create_task(
+            self._pulse_loop(room_id, placeholder_id, pulse_stop)
+        )
+
+        async def stop_pulse_if_needed():
+            """Coupe l'animation pulse une seule fois, au premier token."""
+            if not pulse_stop.is_set():
+                pulse_stop.set()
+                try:
+                    await pulse_task
+                except Exception:
+                    pass
 
         # 1.5 Décision RAG : 3 modes possibles
         #   - tool-mode : provider=ANTHROPIC + RAG enabled → function calling
@@ -292,8 +395,11 @@ class AgentRunner:
                     dispatcher,
                 ):
                     if kind == "text":
+                        if payload:
+                            await stop_pulse_if_needed()
                         buffer += payload
                     elif kind == "tool":
+                        await stop_pulse_if_needed()
                         # Indicateur visuel pendant l'exécution du tool
                         self.log.info(f"tool_use: {payload}")
                         marker = (
@@ -328,6 +434,7 @@ class AgentRunner:
                     system_override=system_override,
                 ):
                     if chunk:
+                        await stop_pulse_if_needed()
                         buffer += chunk
                     if u is not None:
                         usage = u
@@ -347,6 +454,17 @@ class AgentRunner:
             # Fallback : édit avec un message d'erreur si on n'a rien streamé
             if not buffer:
                 buffer = "❌ Désolé, je rencontre un problème technique."
+        finally:
+            # Coupe l'animation « pulse » (au cas où aucun token n'est arrivé,
+            # ex: erreur LLM avant le premier chunk).
+            await stop_pulse_if_needed()
+            # Coupe l'indicateur "is typing" — Element retire l'animation des
+            # 3 points dans tous les cas (succès, erreur, exception).
+            stop_typing.set()
+            try:
+                await typing_task
+            except Exception:
+                pass
 
         # Édit final — toujours envoyé pour garantir le contenu complet,
         # même si la dernière édition throttle l'avait sauté.

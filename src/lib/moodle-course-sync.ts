@@ -8,6 +8,7 @@
  * Idempotent : upsert par `(platformId, cmid)` / `(courseId, moodleId)`,
  * purge ce qui a disparu côté Moodle (cascade FK → chunks supprimés).
  */
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getCourseContents } from "@/lib/moodle-ws";
 import { logger } from "@/lib/logger";
@@ -78,7 +79,21 @@ export async function syncCourseContentsCore(
       byType[m.modname] = (byType[m.modname] ?? 0) + 1;
       totalResources++;
 
-      const file = m.contents?.find((c) => c.type === "file");
+      // Tous les fichiers (book/folder peuvent en avoir plusieurs ; resource
+      // n'en a qu'un). Le 1er est aussi stocké à plat pour rétro-compat des
+      // requêtes existantes. La liste complète va dans `files` (JSON).
+      const allFiles = (m.contents || []).filter((c) => c.type === "file");
+      const file = allFiles[0];
+      const filesPayload =
+        allFiles.length > 0
+          ? allFiles.map((f) => ({
+              fileurl: f.fileurl,
+              filename: f.filename,
+              mimetype: f.mimetype ?? null,
+              filesize: f.filesize ?? null,
+              contenthash: f.contenthash ?? null,
+            }))
+          : null;
 
       await prisma.moodleResource.upsert({
         where: {
@@ -97,6 +112,7 @@ export async function syncCourseContentsCore(
           mimetype: file?.mimetype || null,
           filesize: file?.filesize || null,
           fileurl: file?.fileurl || null,
+          files: filesPayload as Prisma.InputJsonValue | undefined,
         },
         update: {
           sectionId: dbSection.id,
@@ -108,6 +124,7 @@ export async function syncCourseContentsCore(
           mimetype: file?.mimetype || null,
           filesize: file?.filesize || null,
           fileurl: file?.fileurl || null,
+          files: filesPayload as Prisma.InputJsonValue | undefined,
           extractedText: null,
           textExtractedAt: null,
           embeddedAt: null,
