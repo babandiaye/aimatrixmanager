@@ -700,4 +700,4 @@ Logs **pino** redactent automatiquement `*.password`, `*.token`, `*.access_token
 
 Développé par la **DITSI – UN-CHK** (Direction des Infrastructures et des Systèmes d'Information — Université Numérique Cheikh Hamidou Kane).
 
-© DITSI – UN-CHK – 2026 – Tous droits réservés
+© SISS - DITSI – UN-CHK – 2026 – Tous droits réservés
