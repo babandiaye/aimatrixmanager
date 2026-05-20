@@ -62,7 +62,12 @@ model User {
   name          String?
   image         String?
   passwordHash  String?   // null si l'utilisateur ne se connecte qu'en OIDC
-  role          UserRole  @default(AUDITOR)
+  // Défaut ENSEIGNANT : on part du principe que la majorité des comptes
+  // Keycloak UN-CHK sont des enseignants. Si l'user n'a aucun cours Moodle
+  // où il est editingteacher/teacher, `resolveTeacherCourseIds` retourne []
+  // → /mes-cours et /rooms restent vides (pas de fuite de scope). Un ADMIN
+  // peut toujours rétrograder en AUDITOR depuis /users si besoin.
+  role          UserRole  @default(ENSEIGNANT)
 
   // Pour le rôle ENSEIGNANT : mapping résolu plateforme → moodleUserId
   // (par email, via core_user_get_users_by_field). Format JSON :
@@ -312,6 +317,14 @@ model RoomAgent {
   room    Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
   agent   Agent   @relation(fields: [agentId], references: [id], onDelete: Cascade)
   enabled Boolean @default(true)
+
+  // Auto-rejoin si le bot est kické (pas banned) du salon.
+  // Activé par défaut. Cooldown 5 min entre 2 tentatives. Après
+  // 3 échecs consécutifs, on désactive `enabled` automatiquement
+  // pour éviter les boucles kick/rejoin avec un admin humain.
+  autoRejoinOnKick    Boolean   @default(true)
+  lastRejoinAttemptAt DateTime?
+  rejoinFailCount     Int       @default(0)
 
   assignedById String?
   assignedBy   User?    @relation("AssignmentCreator", fields: [assignedById], references: [id], onDelete: SetNull)

@@ -114,11 +114,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   },
   events: {
     // Bootstrap : le tout premier compte créé devient ADMIN (cf README).
+    // On n'écrase pas un role déjà ADMIN/MANAGER (paranoïa : seed ou patch
+    // manuel pré-existant), mais on accepte AUDITOR et ENSEIGNANT comme
+    // candidats à la promotion (les deux rôles possibles selon le défaut
+    // Prisma au moment de la création).
     async createUser({ user }) {
       const total = await prisma.user.count();
       if (total === 1 && user.id) {
         await prisma.user.updateMany({
-          where: { id: user.id, role: "AUDITOR" },
+          where: { id: user.id, role: { in: ["AUDITOR", "ENSEIGNANT"] } },
           data: { role: "ADMIN" },
         });
         log.info(

@@ -1,16 +1,14 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import { loginWithKeycloak } from "./actions";
 
 /**
- * Page de connexion 100% Keycloak.
+ * Vue affichée *uniquement* quand on ne peut pas auto-rediriger vers
+ * Keycloak côté serveur (cas erreur SSO ou ?logged_out=1).
  *
- * - Cas nominal : on auto-submit immédiatement le form vers Keycloak (SSO).
- * - Cas erreur : on n'auto-submit pas (sinon boucle), on affiche un message.
- * - Cas post-logout (?logged_out=1) : on n'auto-submit pas pour laisser
- *   l'utilisateur cliquer manuellement (sinon il est immédiatement renvoyé
- *   sur sa session SSO encore active, ce qui annule le logout perçu).
+ * Le cas nominal (pas d'erreur, pas de post-logout) est intercepté en
+ * amont dans `page.tsx` qui appelle `signIn("keycloak")` côté serveur →
+ * redirect HTTP direct, aucune page HTML rendue.
  */
 export function AutoKeycloak({
   error,
@@ -19,13 +17,6 @@ export function AutoKeycloak({
   error?: string;
   loggedOut?: boolean;
 }) {
-  const ref = useRef<HTMLFormElement>(null);
-
-  useEffect(() => {
-    if (error || loggedOut) return;
-    ref.current?.requestSubmit();
-  }, [error, loggedOut]);
-
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-4">
       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -39,27 +30,15 @@ export function AutoKeycloak({
       )}
 
       {loggedOut && !error && (
-        <p className="text-sm text-muted-foreground">
-          Tu as été déconnecté.
-        </p>
+        <p className="text-sm text-muted-foreground">Tu as été déconnecté.</p>
       )}
 
-      {!error && !loggedOut && (
-        <p className="text-sm text-muted-foreground">
-          Redirection vers Keycloak UN-CHK…
-        </p>
-      )}
-
-      <form ref={ref} action={loginWithKeycloak}>
+      <form action={loginWithKeycloak}>
         <button
           type="submit"
-          className="text-xs text-primary underline-offset-2 hover:underline"
+          className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:opacity-90"
         >
-          {error
-            ? "Réessayer"
-            : loggedOut
-              ? "Se reconnecter"
-              : "Cliquer ici si la redirection ne se fait pas automatiquement"}
+          {error ? "Réessayer" : loggedOut ? "Se reconnecter" : "Se connecter"}
         </button>
       </form>
     </div>

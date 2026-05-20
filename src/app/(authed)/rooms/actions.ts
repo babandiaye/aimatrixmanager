@@ -249,6 +249,137 @@ export async function toggleAssignmentEnabled(
   revalidatePath("/rooms");
 }
 
+/**
+ * Force le bot à rejoindre le salon maintenant via l'API Synapse Admin.
+ * Utilisé après un kick définitif (autoRejoinOnKick=off) ou après que
+ * l'auto-disable a déclenché (l'utilisateur veut rétablir la situation
+ * sans attendre).
+ *
+ * Côté UI :
+ *  - Réactive l'assignation si elle a été désactivée (enabled=false)
+ *  - Reset le compteur d'échecs à 0
+ *  - Appelle `joinUserToRoom` (idempotent : si le bot est déjà membre,
+ *    Synapse renvoie 200 sans rien faire)
+ */
+export async function manualRejoinAgent(assignmentId: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  if (!canAny(session.user.role, "rooms.assign", "rooms.assign-own")) {
+    throw new Error("Forbidden: pas de permission rooms.assign");
+  }
+
+  const teacherCourseIds =
+    session.user.role === "ENSEIGNANT"
+      ? await resolveTeacherCourseIds(session.user.id)
+      : null;
+  const ra = await prisma.roomAgent.findFirst({
+    where: {
+      id: assignmentId,
+      room: roomWhereForTeacher(session.user.role, teacherCourseIds),
+    },
+    select: {
+      id: true,
+      roomId: true,
+      room: { select: { matrixRoomId: true } },
+      agent: { select: { matrixUserId: true, slug: true } },
+    },
+  });
+  if (!ra) throw new Error("Affectation introuvable");
+
+  await joinUserToRoom({
+    matrixUserId: ra.agent.matrixUserId,
+    matrixRoomId: ra.room.matrixRoomId,
+  });
+
+  await prisma.roomAgent.update({
+    where: { id: ra.id },
+    data: { enabled: true, rejoinFailCount: 0 },
+  });
+
+  log.info(
+    { assignmentId, slug: ra.agent.slug, by: session.user.id },
+    "manual rejoin",
+  );
+  revalidatePath(`/rooms/${ra.roomId}`);
+}
+
+/**
+ * Réinitialise juste le compteur d'échecs de rejoin (sans toucher à
+ * `enabled` ni `autoRejoinOnKick`). Permet de redonner une chance au bot
+ * après avoir corrigé la cause des kicks, sans bouger le reste de la
+ * policy.
+ */
+export async function resetRejoinFailCount(assignmentId: string) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  if (!canAny(session.user.role, "rooms.assign", "rooms.assign-own")) {
+    throw new Error("Forbidden: pas de permission rooms.assign");
+  }
+
+  const teacherCourseIds =
+    session.user.role === "ENSEIGNANT"
+      ? await resolveTeacherCourseIds(session.user.id)
+      : null;
+  const existing = await prisma.roomAgent.findFirst({
+    where: {
+      id: assignmentId,
+      room: roomWhereForTeacher(session.user.role, teacherCourseIds),
+    },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("Affectation introuvable");
+
+  const a = await prisma.roomAgent.update({
+    where: { id: assignmentId },
+    data: { rejoinFailCount: 0 },
+    select: { roomId: true },
+  });
+  revalidatePath(`/rooms/${a.roomId}`);
+}
+
+/**
+ * Toggle `autoRejoinOnKick` sur une affectation. Si désactivé, un kick admin
+ * du bot laisse le salon sans intervention. Si activé (défaut), le bot
+ * retente automatiquement le join (avec cooldown 5 min, et auto-disable
+ * après 3 échecs consécutifs).
+ *
+ * Lors d'une réactivation, on remet aussi le compteur d'échecs à zéro pour
+ * laisser une chance fraîche au bot.
+ */
+export async function toggleAutoRejoinOnKick(
+  assignmentId: string,
+  autoRejoin: boolean,
+) {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  if (!canAny(session.user.role, "rooms.assign", "rooms.assign-own")) {
+    throw new Error("Forbidden: pas de permission rooms.assign");
+  }
+
+  const teacherCourseIds =
+    session.user.role === "ENSEIGNANT"
+      ? await resolveTeacherCourseIds(session.user.id)
+      : null;
+  const existing = await prisma.roomAgent.findFirst({
+    where: {
+      id: assignmentId,
+      room: roomWhereForTeacher(session.user.role, teacherCourseIds),
+    },
+    select: { id: true },
+  });
+  if (!existing) throw new Error("Affectation introuvable");
+
+  const a = await prisma.roomAgent.update({
+    where: { id: assignmentId },
+    data: {
+      autoRejoinOnKick: autoRejoin,
+      ...(autoRejoin ? { rejoinFailCount: 0 } : {}),
+    },
+    select: { roomId: true },
+  });
+  revalidatePath(`/rooms/${a.roomId}`);
+}
+
 const renameSchema = z
   .string()
   .min(1, "Nom requis")

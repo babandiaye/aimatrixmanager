@@ -97,6 +97,143 @@ async def get_room_assignment(
     )
 
 
+async def list_assigned_matrix_rooms(agent_id: str) -> list[str]:
+    """Liste des matrix_room_id où l'agent est censé être membre actif.
+    Sert à la reconciliation membership au boot : on compare cette liste avec
+    `self.client.rooms.keys()` pour détecter les rooms perdues hors-ligne.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT r."matrixRoomId" AS mxid
+        FROM "RoomAgent" ra
+        JOIN "Room" r ON r.id = ra."roomId"
+        WHERE ra."agentId" = $1
+          AND ra.enabled = true
+          AND ra."autoRejoinOnKick" = true
+        """,
+        agent_id,
+    )
+    return [r["mxid"] for r in rows]
+
+
+async def claim_rejoin_attempt(
+    agent_id: str, matrix_room_id: str, cooldown_sec: int
+) -> Optional[dict]:
+    """Tente d'acquérir le « slot » de rejoin pour ce (agent, room).
+
+    Atomique : un seul UPDATE qui sert à la fois de check policy + cooldown
+    + lock (pose `lastRejoinAttemptAt=NOW()` pour bloquer les attempts
+    concurrents). Si la mise à jour ne touche aucune ligne (RETURNING vide),
+    c'est qu'on n'a pas le droit/pas le moment de tenter — on doit skip.
+
+    Retourne le dict {id, fail_count} si on a le slot, None sinon.
+
+    Évite la race où deux events arrivent en // et passent tous les deux le
+    check préalable avant l'écriture.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE "RoomAgent" ra
+        SET "lastRejoinAttemptAt" = NOW()
+        FROM "Room" r
+        WHERE ra."roomId" = r.id
+          AND ra."agentId" = $1
+          AND r."matrixRoomId" = $2
+          AND ra.enabled = true
+          AND ra."autoRejoinOnKick" = true
+          AND (
+            ra."lastRejoinAttemptAt" IS NULL
+            OR ra."lastRejoinAttemptAt" < NOW() - ($3 * INTERVAL '1 second')
+          )
+        RETURNING ra.id, ra."rejoinFailCount" AS fail_count
+        """,
+        agent_id,
+        matrix_room_id,
+        cooldown_sec,
+    )
+    return dict(row) if row else None
+
+
+async def record_rejoin_result(
+    room_agent_id: str, success: bool
+) -> int:
+    """Met à jour le compteur d'échecs après une tentative.
+    - success=True  → reset à 0
+    - success=False → +1, retourne le nouveau total
+    """
+    pool = await get_pool()
+    if success:
+        await pool.execute(
+            'UPDATE "RoomAgent" SET "rejoinFailCount" = 0 WHERE id = $1',
+            room_agent_id,
+        )
+        return 0
+    row = await pool.fetchrow(
+        """
+        UPDATE "RoomAgent"
+        SET "rejoinFailCount" = "rejoinFailCount" + 1
+        WHERE id = $1
+        RETURNING "rejoinFailCount"
+        """,
+        room_agent_id,
+    )
+    return int(row["rejoinFailCount"]) if row else 0
+
+
+async def disable_room_agent(room_agent_id: str) -> None:
+    """Désactive l'assignation après trop d'échecs de rejoin. L'enseignant
+    pourra réactiver manuellement depuis /rooms/[id] s'il le souhaite.
+    """
+    pool = await get_pool()
+    await pool.execute(
+        'UPDATE "RoomAgent" SET enabled = false WHERE id = $1',
+        room_agent_id,
+    )
+
+
+async def insert_system_audit(
+    *,
+    room_agent_id: str,
+    agent_id: str,
+    user_message: str,
+    error: Optional[str] = None,
+) -> None:
+    """Trace dans `AuditLog` un événement système (auto-disable, rejoin
+    forcé…). Visible dans /audit avec le sender sentinelle `system:rejoin`,
+    ce qui permet à l'admin de retrouver l'incident sans naviguer dans
+    les logs container.
+    """
+    pool = await get_pool()
+    # On a besoin du roomId (PK) depuis le room_agent_id.
+    row = await pool.fetchrow(
+        'SELECT "roomId" FROM "RoomAgent" WHERE id = $1',
+        room_agent_id,
+    )
+    if not row:
+        return
+    log_id = "sys_" + secrets.token_hex(12)
+    synthetic_event_id = f"sys-rejoin-{room_agent_id}-{secrets.token_hex(4)}"
+    await pool.execute(
+        """
+        INSERT INTO "AuditLog" (
+            id, "roomId", "agentId", "matrixEventId", "senderMxid",
+            "userMessage", error, "createdAt"
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        ON CONFLICT ("matrixEventId") DO NOTHING
+        """,
+        log_id,
+        row["roomId"],
+        agent_id,
+        synthetic_event_id,
+        "system:rejoin",
+        user_message,
+        error,
+    )
+
+
 async def save_device_id(agent_id: str, device_id: str) -> None:
     """Met à jour le device_id de l'agent (utile au 1er démarrage après whoami)."""
     pool = await get_pool()

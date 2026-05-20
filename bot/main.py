@@ -28,6 +28,7 @@ from nio import (
     KeysUploadResponse,
     MatrixRoom,
     MegolmEvent,
+    RoomMemberEvent,
     RoomMessageText,
 )
 
@@ -41,9 +42,19 @@ load_dotenv()
 
 # ── Configuration globale ─────────────────────────────────────────────────────
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://127.0.0.1:8008")
+SYNAPSE_ADMIN_TOKEN = os.getenv("SYNAPSE_ADMIN_TOKEN", "")
 STORE_ROOT = os.getenv("STORE_PATH", "/app/store")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
+
+# ── Auto-rejoin sur kick ──────────────────────────────────────────────────────
+# Cooldown entre 2 tentatives de rejoin pour éviter de spammer Synapse
+# en cas de bagarre avec un admin qui kick en boucle. Au-delà de
+# REJOIN_MAX_FAILS échecs consécutifs, on désactive l'assignation
+# (RoomAgent.enabled=false) — l'admin du salon a clairement décidé que
+# le bot n'y avait pas sa place, on lâche prise.
+REJOIN_COOLDOWN_SEC = int(os.getenv("REJOIN_COOLDOWN_SEC", "300"))   # 5 min
+REJOIN_MAX_FAILS = int(os.getenv("REJOIN_MAX_FAILS", "3"))
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -560,6 +571,145 @@ class AgentRunner:
         self.log.info(f"Invitation reçue → {room.room_id}")
         await self.client.join(room.room_id)
 
+    # ── Auto-rejoin sur kick ─────────────────────────────────────────────────
+    # Quand le bot perd son membership (kick admin), Synapse pousse un event
+    # `m.room.member` avec state_key=<MXID du bot> et membership=leave. Si le
+    # sender est ≠ du bot lui-même, c'est un kick. On consulte alors la DB
+    # pour décider si on rejoint (RoomAgent.enabled + autoRejoinOnKick + cooldown).
+    async def _rejoin_via_admin(self, room_id: str) -> bool:
+        """Rejoint la room via l'API Synapse Admin (le client lui-même ne peut
+        pas car il n'est plus membre). Nécessite SYNAPSE_ADMIN_TOKEN.
+        """
+        if not SYNAPSE_ADMIN_TOKEN:
+            self.log.error("SYNAPSE_ADMIN_TOKEN manquant — rejoin impossible")
+            return False
+        url = f"{MATRIX_HOMESERVER}/_synapse/admin/v1/join/{room_id}"
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                r = await http.post(
+                    url,
+                    headers={"Authorization": f"Bearer {SYNAPSE_ADMIN_TOKEN}"},
+                    json={"user_id": self.row.matrix_user_id},
+                )
+                if r.status_code == 200:
+                    return True
+                self.log.warning(
+                    f"rejoin admin {room_id}: {r.status_code} {r.text[:200]}"
+                )
+                return False
+        except Exception as e:
+            self.log.warning(f"rejoin admin {room_id}: {e}")
+            return False
+
+    async def _attempt_rejoin(self, matrix_room_id: str, reason: str) -> None:
+        """Tente un rejoin si la policy l'autorise et que le cooldown est passé.
+
+        Implémentation atomique : `claim_rejoin_attempt` fait le check policy
+        + cooldown + lock en un seul UPDATE atomique. Si ça renvoie None,
+        c'est qu'on n'a pas le slot (assignation off, autoRejoin off, ou
+        cooldown encore actif) — on skip silencieusement.
+
+        Appelé depuis 2 endroits :
+          - `on_member_change` (kick observé en live)
+          - `_reconcile_membership_at_boot` (kick survenu hors-ligne)
+        """
+        claim = await db.claim_rejoin_attempt(
+            self.row.id, matrix_room_id, REJOIN_COOLDOWN_SEC
+        )
+        if claim is None:
+            self.log.debug(
+                f"[{reason}] rejoin skip {matrix_room_id[:25]} "
+                f"(policy off ou cooldown actif)"
+            )
+            return
+
+        self.log.info(
+            f"[{reason}] tentative rejoin {matrix_room_id[:25]}…"
+        )
+        success = await self._rejoin_via_admin(matrix_room_id)
+        fail_count = await db.record_rejoin_result(claim["id"], success)
+
+        if success:
+            self.log.info(f"✅ Rejoin OK {matrix_room_id[:25]}")
+            return
+
+        self.log.warning(
+            f"❌ Rejoin échec ({fail_count}/{REJOIN_MAX_FAILS}) "
+            f"{matrix_room_id[:25]}"
+        )
+        if fail_count >= REJOIN_MAX_FAILS:
+            self.log.warning(
+                f"Plafond d'échecs atteint — désactivation de l'assignation "
+                f"{matrix_room_id[:25]}"
+            )
+            await db.disable_room_agent(claim["id"])
+            try:
+                await db.insert_system_audit(
+                    room_agent_id=claim["id"],
+                    agent_id=self.row.id,
+                    user_message=(
+                        f"Assignation désactivée automatiquement après "
+                        f"{fail_count} tentatives de rejoin échouées "
+                        f"(salon {matrix_room_id})."
+                    ),
+                    error="auto-disabled-rejoin",
+                )
+            except Exception as e:
+                self.log.warning(f"Audit auto-disable : {e}")
+
+    async def on_member_change(self, room: MatrixRoom, event: RoomMemberEvent):
+        # On ne traite que les events qui concernent CET agent.
+        if event.state_key != self.row.matrix_user_id:
+            return
+        # On ne réagit qu'à une transition vers "leave" — ban est définitif,
+        # invite/join sont gérés ailleurs.
+        if event.membership != "leave":
+            return
+        # Self-leave (parti volontairement via la lib) : pas un kick.
+        if event.sender == self.row.matrix_user_id:
+            return
+        # Si l'event précédent était "ban", Matrix garde l'utilisateur dehors
+        # tant que le ban n'est pas levé — inutile d'essayer.
+        if event.prev_membership == "ban":
+            self.log.info(f"Bot banni de {room.room_id[:25]} — pas de rejoin")
+            return
+
+        self.log.warning(
+            f"Kické de {room.room_id[:25]} par {event.sender}"
+        )
+        await self._attempt_rejoin(room.room_id, reason="kick-live")
+
+    async def _reconcile_membership_at_boot(self) -> None:
+        """Au démarrage, compare les rooms assignées en DB avec celles où le
+        client est effectivement membre. Pour les divergences (rooms perdues
+        pendant que le bot était hors ligne), on tente un rejoin. Le cooldown
+        atomique évite de spammer si l'auto-désactivation s'est déjà
+        déclenchée juste avant le redémarrage.
+        """
+        try:
+            assigned = await db.list_assigned_matrix_rooms(self.row.id)
+        except Exception as e:
+            self.log.warning(f"Reconcile boot — liste DB : {e}")
+            return
+
+        joined = set(self.client.rooms.keys()) if self.client else set()
+        missing = [rid for rid in assigned if rid not in joined]
+        if not missing:
+            self.log.info(
+                f"Reconcile boot : {len(assigned)} room(s) assignée(s), "
+                "toutes présentes côté Matrix"
+            )
+            return
+
+        self.log.warning(
+            f"Reconcile boot : {len(missing)}/{len(assigned)} room(s) "
+            f"manquante(s) — tentative de rejoin"
+        )
+        # Sérialisé exprès : on ne veut pas DDOS Synapse au démarrage d'un
+        # agent qui aurait perdu des dizaines de rooms d'un coup.
+        for rid in missing:
+            await self._attempt_rejoin(rid, reason="boot-recovery")
+
     async def keys_loop(self):
         await asyncio.sleep(15)
         while True:
@@ -604,6 +754,13 @@ class AgentRunner:
         self.client.add_event_callback(self.on_text, RoomMessageText)
         self.client.add_event_callback(self.on_megolm, MegolmEvent)
         self.client.add_event_callback(self.on_invite, InviteMemberEvent)
+        self.client.add_event_callback(self.on_member_change, RoomMemberEvent)
+
+        # Reconciliation membership : si des kicks ont eu lieu pendant que
+        # cet agent était hors-ligne, le callback on_member_change n'aura
+        # pas été déclenché. On compare DB ↔ Matrix après le sync initial
+        # et on rattrape les divergences via `_attempt_rejoin`.
+        await self._reconcile_membership_at_boot()
 
         asyncio.create_task(self.keys_loop())
         asyncio.create_task(self.heartbeat_loop())

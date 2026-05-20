@@ -219,6 +219,8 @@ export default async function RoomDetailPage({
             assignments={room.assignments.map((a) => ({
               id: a.id,
               enabled: a.enabled,
+              autoRejoinOnKick: a.autoRejoinOnKick,
+              rejoinFailCount: a.rejoinFailCount,
               agent: a.agent,
             }))}
             availableAgents={availableAgents}
