@@ -137,27 +137,45 @@ class AgentRunner:
         return True
 
     # ── Détection mention ──────────────────────────────────────────────────────
+    # Frontières de mot personnalisées : on considère `\w` ET `-` comme
+    # « intérieur de mot ». Objectif : éviter que le slug `ia` matche dans
+    # `@ia-maths` ou que `@rssi` matche dans `@rssi-doe`. `\b` seul ne
+    # suffit pas car `-` n'est pas dans `\w`, donc `@ia` matcherait
+    # `@ia-maths` en `\b`.
+    _WB_LEFT = r"(?<![\w-])"
+    _WB_RIGHT = r"(?![\w-])"
+
+    def _mention_hit(self, needle: str, haystack: str) -> bool:
+        if not needle:
+            return False
+        pattern = self._WB_LEFT + re.escape(needle) + self._WB_RIGHT
+        return re.search(pattern, haystack, re.IGNORECASE) is not None
+
     def is_mentioned(self, event, body: str) -> bool:
-        # 1. m.mentions.user_ids (MSC3952)
+        # 1. m.mentions.user_ids (MSC3952) — chemin propre, exact.
         try:
             mentions = (event.source or {}).get("content", {}).get("m.mentions", {})
             if self.row.matrix_user_id in (mentions.get("user_ids") or []):
                 return True
         except Exception:
             pass
-        # 2. body contient le slug ou le MXID
-        low = body.lower()
-        if f"@{self.localpart}".lower() in low:
-            return True
-        if self.row.matrix_user_id.lower() in low:
-            return True
-        # 3. body contient le display name
-        if self.row.name.lower() in low:
-            return True
-        # 4. formatted_body avec pill
+
+        # 2. Fallback body : matcher à frontières de mots pour éviter les
+        # faux positifs (slug préfixe d'un autre, mot au milieu d'un texte).
+        for needle in (
+            f"@{self.localpart}",
+            self.row.matrix_user_id,
+            self.row.name,
+        ):
+            if self._mention_hit(needle, body):
+                return True
+
+        # 3. formatted_body avec pill — le MXID complet contient `:` donc
+        # est déjà safe même sans frontière, mais on garde la même règle
+        # pour cohérence.
         try:
             formatted = (event.source or {}).get("content", {}).get("formatted_body") or ""
-            if self.row.matrix_user_id in formatted:
+            if self._mention_hit(self.row.matrix_user_id, formatted):
                 return True
         except Exception:
             pass
