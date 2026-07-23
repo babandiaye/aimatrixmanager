@@ -7,7 +7,11 @@ import authConfig from "./auth.config";
 const { auth } = NextAuth(authConfig);
 
 const PUBLIC_PREFIXES = ["/login", "/api/auth"];
-const PUBLIC_EXACT = ["/"];
+// /access-denied : pas de session NextAuth (l'auth a été rejetée), donc
+// public — sinon boucle de redirect vers /login.
+// /help : accessible aux users rejetés pour qu'ils trouvent les coordonnées
+// DITSI et la FAQ d'accès.
+const PUBLIC_EXACT = ["/", "/access-denied", "/help"];
 
 export default auth((req) => {
   const { pathname } = req.nextUrl;

@@ -1,11 +1,24 @@
 import NextAuth, { type DefaultSession } from "next-auth";
 import { PrismaAdapter } from "@auth/prisma-adapter";
+import { cookies, headers } from "next/headers";
 import authConfig from "./auth.config";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import type { UserRole } from "@prisma/client";
 
 const log = logger.child({ mod: "auth" });
+
+// Affiliations Keycloak autorisées à entrer sur aibotmanager. Les valeurs
+// inconnues, null/undefined, "Etudiant" et "Tuteur" sont refusées avec
+// renvoi vers /access-denied (cf. callback signIn). Liste blanche pour
+// éviter qu'un nouveau type d'affiliation passe par défaut.
+const ALLOWED_AFFILIATIONS = new Set<string>(["Personnel"]);
+
+// Cookie qui transporte l'id_token Keycloak entre le rejet d'auth et la
+// page /access-denied — permet à l'user de fermer proprement sa session
+// SSO via le bouton « Retour ». Court (5 min), httpOnly, lax.
+const REJECTION_COOKIE = "kc_rejected_id_token";
+const REJECTION_COOKIE_TTL = 60 * 5;
 
 // Étend les types NextAuth pour exposer id, role et l'id_token Keycloak.
 // L'id_token (~1.2 KB) est stocké dans le JWT pour pouvoir faire un logout
@@ -28,10 +41,131 @@ declare module "next-auth" {
 // charge (une requête DB toutes les 60s par session active).
 const ROLE_REFRESH_TTL = 60;
 
+// Décode le payload d'un JWT non-vérifié. On a déjà confiance dans
+// l'id_token (il vient de Keycloak via le flow OIDC qu'Auth.js a vérifié) —
+// ici on l'utilise uniquement pour extraire un claim custom qui ne fait
+// pas partie de la réponse userinfo.
+function decodeIdTokenClaim(
+  idToken: string | null | undefined,
+  claim: string,
+): unknown {
+  if (!idToken) return null;
+  try {
+    const parts = idToken.split(".");
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    return payload[claim] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Extrait l'IP cliente depuis les headers HTTP. nginx forwarde via
+// X-Forwarded-For (chaîne d'IPs ; on prend la première = client réel).
+// Fallback sur X-Real-IP si présent. Tronque pour éviter les headers
+// abusivement longs.
+async function getClientIp(): Promise<string | null> {
+  try {
+    const h = await headers();
+    const fwd = h.get("x-forwarded-for");
+    if (fwd) return fwd.split(",")[0]?.trim().slice(0, 64) ?? null;
+    const real = h.get("x-real-ip");
+    if (real) return real.slice(0, 64);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   adapter: PrismaAdapter(prisma),
   callbacks: {
+    // Gate d'entrée post-SSO. Keycloak a validé l'identité, mais on
+    // restreint ici par `affiliation` (custom claim Keycloak) : seul
+    // « Personnel » entre. Les autres valeurs (Etudiant, Tuteur, null,
+    // affiliation inconnue) sont rejetées avec redirection vers
+    // /access-denied. On capture l'id_token dans un cookie httpOnly
+    // court (5min) pour permettre à /access-denied de proposer un
+    // bouton « Retour » qui ferme la session Keycloak proprement.
+    async signIn({ user, account, profile }) {
+      // On ne filtre que les connexions OIDC Keycloak (pas les
+      // adapters internes type credentials, qui n'existent plus mais
+      // sait-on jamais).
+      if (account?.provider !== "keycloak") return true;
+
+      // Keycloak peut mettre certains claims dans l'id_token uniquement
+      // (pas dans la réponse userinfo). Or Auth.js construit `profile`
+      // depuis userinfo. On lit donc d'abord profile, et on fallback sur
+      // le claim de l'id_token si absent — c'est exactement le même claim
+      // (Keycloak les remplit depuis la même source).
+      const affiliationFromProfile =
+        typeof profile?.affiliation === "string"
+          ? profile.affiliation
+          : null;
+      const affiliationFromIdToken = decodeIdTokenClaim(
+        account.id_token,
+        "affiliation",
+      );
+      const affiliation =
+        affiliationFromProfile ??
+        (typeof affiliationFromIdToken === "string"
+          ? affiliationFromIdToken
+          : null);
+      const email = (user?.email ?? profile?.email ?? null) as
+        | string
+        | null;
+      const ip = await getClientIp();
+
+      if (!affiliation || !ALLOWED_AFFILIATIONS.has(affiliation)) {
+        // Trace explicite — l'admin pourra retrouver les tentatives
+        // dans la table AuthAuditLog.
+        try {
+          await prisma.authAuditLog.create({
+            data: {
+              type: "ACCESS_DENIED",
+              email,
+              provider: account.provider,
+              ipAddress: ip,
+              reason: `affiliation=${affiliation ?? "null"}`,
+            },
+          });
+        } catch (e) {
+          log.warn({ err: e }, "AuthAuditLog ACCESS_DENIED insert failed");
+        }
+
+        // Dépose l'id_token dans un cookie httpOnly pour permettre à
+        // /access-denied de fermer la session SSO Keycloak.
+        if (account.id_token) {
+          try {
+            const c = await cookies();
+            c.set(REJECTION_COOKIE, account.id_token, {
+              httpOnly: true,
+              secure: true,
+              sameSite: "lax",
+              path: "/",
+              maxAge: REJECTION_COOKIE_TTL,
+            });
+          } catch (e) {
+            log.warn({ err: e }, "REJECTION_COOKIE set failed");
+          }
+        }
+
+        log.info(
+          { email, ip, affiliation },
+          "Sign-in refusé : affiliation non autorisée",
+        );
+
+        // Return d'URL string → Auth.js redirige vers cette page au lieu
+        // de créer la session. Le query ?reason=... est purement
+        // cosmétique (déjà loggé en DB).
+        return "/access-denied?reason=affiliation";
+      }
+
+      return true;
+    },
     async jwt({ token, user, trigger, account }) {
       const t = token as typeof token & {
         id?: string;
@@ -131,9 +265,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         );
       }
     },
-    // Audit : trace chaque connexion réussie. Fail-safe : si l'insert
-    // échoue (DB momentanément down), on log mais on ne bloque pas le signin.
+    // Audit : trace chaque connexion réussie + met à jour User.lastLoginAt
+    // et User.lastLoginIp. Fail-safe : si l'insert échoue (DB momentanément
+    // down), on log mais on ne bloque pas le signin.
     async signIn({ user, account }) {
+      const ip = await getClientIp();
       try {
         await prisma.authAuditLog.create({
           data: {
@@ -141,10 +277,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             userId: user.id ?? null,
             email: user.email ?? null,
             provider: account?.provider ?? null,
+            ipAddress: ip,
           },
         });
       } catch (e) {
         log.warn({ err: e }, "AuthAuditLog SIGN_IN insert failed");
+      }
+      if (user.id) {
+        try {
+          await prisma.user.update({
+            where: { id: user.id },
+            data: { lastLoginAt: new Date(), lastLoginIp: ip },
+          });
+        } catch (e) {
+          log.warn({ err: e }, "User lastLogin* update failed");
+        }
       }
     },
     async signOut(message) {

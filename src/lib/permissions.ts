@@ -26,9 +26,6 @@ export type Permission =
   | "rooms.assign-own"
   | "rooms.view"
   | "rooms.view-own"
-  // Knowledge base RAG
-  | "kb.write"
-  | "kb.view"
   // Audit
   | "audit.view"
   | "audit.delete";
@@ -37,7 +34,6 @@ const MANAGER_PERMS: ReadonlySet<Permission> = new Set([
   "moodle.view",
   "agents.create", "agents.update", "agents.delete", "agents.view",
   "rooms.assign", "rooms.view",
-  "kb.write", "kb.view",
   "audit.view",
 ]);
 
@@ -50,14 +46,12 @@ const ENSEIGNANT_PERMS: ReadonlySet<Permission> = new Set([
   "agents.view-own",
   "rooms.assign-own",
   "rooms.view-own",
-  "kb.view",
 ]);
 
 const AUDITOR_PERMS: ReadonlySet<Permission> = new Set([
   "moodle.view",
   "agents.view",
   "rooms.view",
-  "kb.view",
   "audit.view",
 ]);
 

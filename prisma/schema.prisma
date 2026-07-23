@@ -43,6 +43,10 @@ enum RoomSource {
 enum AuthEventType {
   SIGN_IN
   SIGN_OUT
+  // Trace les rejets d'authentification post-SSO (Keycloak OK mais
+  // affiliation insuffisante côté aibotmanager). userId est null
+  // puisque le compte n'a pas été créé.
+  ACCESS_DENIED
 }
 
 // ─── Settings système (singleton, id="global") ───────────────────────────────
@@ -61,13 +65,17 @@ model User {
   emailVerified DateTime?
   name          String?
   image         String?
-  passwordHash  String?   // null si l'utilisateur ne se connecte qu'en OIDC
   // Défaut ENSEIGNANT : on part du principe que la majorité des comptes
   // Keycloak UN-CHK sont des enseignants. Si l'user n'a aucun cours Moodle
   // où il est editingteacher/teacher, `resolveTeacherCourseIds` retourne []
   // → /mes-cours et /rooms restent vides (pas de fuite de scope). Un ADMIN
   // peut toujours rétrograder en AUDITOR depuis /users si besoin.
   role          UserRole  @default(ENSEIGNANT)
+
+  // Dernière connexion réussie (mise à jour au signIn). Visible
+  // uniquement par les ADMIN dans /users — sert au monitoring usage.
+  lastLoginAt   DateTime?
+  lastLoginIp   String?
 
   // Pour le rôle ENSEIGNANT : mapping résolu plateforme → moodleUserId
   // (par email, via core_user_get_users_by_field). Format JSON :
@@ -137,6 +145,10 @@ model AuthAuditLog {
   user      User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   email     String?       // capturé au moment de l'événement
   provider  String?       // "credentials" | "keycloak"
+  ipAddress String?       // X-Forwarded-For dérivé (nginx)
+  // Détail contextuel : raison du rejet pour ACCESS_DENIED
+  // (ex: "affiliation=Etudiant"), null sinon.
+  reason    String?
   createdAt DateTime      @default(now())
 
   @@index([userId, createdAt])
