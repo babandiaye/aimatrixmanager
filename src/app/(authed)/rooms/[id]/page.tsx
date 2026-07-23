@@ -109,30 +109,88 @@ export default async function RoomDetailPage({
   const assignedAgentIds = new Set(room.assignments.map((a) => a.agentId));
   const availableAgents = allAgents.filter((a) => !assignedAgentIds.has(a.id));
 
-  // CourseLinker : on ne propose QUE les cours qui ont au moins une activité
-  // mod_matrix synchronisée — avant on proposait TOUS les cours (centaines
-  // pour P12SEJA) et un admin pouvait lier la room à un cours sans rapport,
-  // ce qui faisait disparaître la room du scope ENSEIGNANT légitime.
+  // CourseLinker : sélecteur du cours Moodle associé au salon pour le RAG.
+  // - ENSEIGNANT → ses propres cours (résolus via Moodle WS), filtrés aux
+  //   cours indexables.
+  // - ADMIN/MANAGER → tous les cours indexables.
+  // - Le cours actuellement lié est toujours inclus, pour pouvoir le délier
+  //   même s'il a depuis été désindexé ou retiré côté Moodle.
   //
-  // Le cours actuellement lié est inclus quoi qu'il arrive, pour qu'on
-  // puisse le voir et le délier même si l'activité a disparu côté Moodle.
-  const matrixActivities = await prisma.moodleMatrixActivity.findMany({
-    select: { platformId: true, moodleCourseId: true },
-    distinct: ["platformId", "moodleCourseId"],
-  });
-  const allCourses = await prisma.moodleCourse.findMany({
+  // « Indexable » = au moins une ressource exploitable par le RAG
+  // (book/resource/page/folder/label). On affiche en plus un badge avec
+  // le nombre de mod_book pour mettre en avant les cours qui rendent le
+  // mieux aujourd'hui dans le RAG.
+  const INDEXABLE_MODNAMES = ["book", "resource", "page", "folder", "label"];
+
+  const teacherCourseIdsForLinker =
+    session.user.role === "ENSEIGNANT"
+      ? await (async () => {
+          const { resolveTeacherCourseIds } = await import(
+            "@/lib/teacher-scope"
+          );
+          return resolveTeacherCourseIds(session.user.id);
+        })()
+      : null;
+
+  const indexableCoursesRaw = await prisma.moodleCourse.findMany({
     where: {
-      OR: [
-        ...matrixActivities.map((a) => ({
-          platformId: a.platformId,
-          moodleId: a.moodleCourseId,
-        })),
-        ...(room.moodleCourseId ? [{ id: room.moodleCourseId }] : []),
+      AND: [
+        // Au moins une ressource RAGable (jointure via sections)
+        {
+          sections: {
+            some: {
+              resources: { some: { modname: { in: INDEXABLE_MODNAMES } } },
+            },
+          },
+        },
+        // Scope ENSEIGNANT
+        ...(teacherCourseIdsForLinker !== null
+          ? [{ id: { in: teacherCourseIdsForLinker } }]
+          : []),
       ],
     },
-    include: { platform: { select: { key: true } } },
+    include: {
+      platform: { select: { key: true } },
+      sections: {
+        select: {
+          resources: {
+            where: { modname: "book" },
+            select: { id: true },
+          },
+        },
+      },
+    },
     orderBy: [{ platform: { key: "asc" } }, { shortname: "asc" }],
   });
+
+  // Garantit que le cours actuellement lié est dans la liste (cas où il
+  // ne matche plus les filtres ci-dessus : indexation retirée, ENSEIGNANT
+  // qui a perdu le cours côté Moodle, etc.).
+  if (
+    room.moodleCourseId &&
+    !indexableCoursesRaw.some((c) => c.id === room.moodleCourseId)
+  ) {
+    const fallback = await prisma.moodleCourse.findUnique({
+      where: { id: room.moodleCourseId },
+      include: {
+        platform: { select: { key: true } },
+        sections: {
+          select: {
+            resources: { where: { modname: "book" }, select: { id: true } },
+          },
+        },
+      },
+    });
+    if (fallback) indexableCoursesRaw.unshift(fallback);
+  }
+
+  const allCourses = indexableCoursesRaw.map((c) => ({
+    id: c.id,
+    platformKey: c.platform.key,
+    shortname: c.shortname,
+    fullname: c.fullname,
+    bookCount: c.sections.reduce((s, sec) => s + sec.resources.length, 0),
+  }));
 
   return (
     <div className="space-y-6">
@@ -248,11 +306,8 @@ export default async function RoomDetailPage({
                 platformKey: room.moodleCourse.platform.key,
               }
             }
-            courses={allCourses.map((c) => ({
-              id: c.id,
-              label: `[${c.platform.key}] ${c.shortname} — ${c.fullname}`,
-            }))}
-            canAssign={canAdmin}
+            courses={allCourses}
+            canAssign={canAssign}
           />
         </CardContent>
       </Card>

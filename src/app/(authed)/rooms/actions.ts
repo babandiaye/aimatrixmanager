@@ -454,10 +454,24 @@ export async function linkRoomToCourse(
 ) {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  // Lier une room à un cours est réservé à ADMIN/MANAGER — l'enseignant ne
-  // peut pas réaffecter des rooms à des cours arbitraires.
-  assertCan(session.user.role, "rooms.assign");
+
+  // Lier ou délier le cours Moodle d'un salon pour activer le RAG dessus.
+  // - ADMIN/MANAGER : peuvent associer le salon à n'importe quel cours.
+  // - ENSEIGNANT : peut associer son salon (vérifié par `roomScope`) à un
+  //   de SES propres cours (vérifié contre `resolveTeacherCourseIds`).
+  if (!canAny(session.user.role, "rooms.assign", "rooms.assign-own")) {
+    throw new Error("Forbidden: pas de permission rooms.assign");
+  }
   await assertRoomAccessible(session.user.role, session.user.id, roomId);
+
+  if (session.user.role === "ENSEIGNANT" && moodleCourseId) {
+    const teacherCourseIds = await resolveTeacherCourseIds(session.user.id);
+    if (!teacherCourseIds.includes(moodleCourseId)) {
+      throw new Error(
+        "Forbidden: ce cours n'est pas dans vos cours Moodle",
+      );
+    }
+  }
 
   await prisma.room.update({
     where: { id: roomId },
