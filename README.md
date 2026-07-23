@@ -4,18 +4,17 @@ Plateforme d'administration des **agents IA Matrix** intégrés aux cours Moodle
 
 Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable de répondre à `@mention` dans les salons associés à des activités Moodle.
 
+> 📘 **Pour déployer aibotmanager pas à pas** (Ubuntu vierge → premier message d'un agent), suivre [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
 ---
 
 ## Sommaire
 
 - [Architecture](#architecture)
 - [Stack technique](#stack-technique)
-- [Prérequis](#prérequis)
-  - [Moodle — service Web Services](#moodle--service-web-services)
-- [Installation](#installation)
-- [Configuration `.env`](#configuration-env)
+- [Prérequis express](#prérequis-express)
 - [Lancer en développement](#lancer-en-développement)
-- [Déploiement production (systemd)](#déploiement-production-systemd)
+- [Mise à jour code (cycle prod)](#mise-à-jour-code-cycle-prod)
 - [Bot runtime multi-agents](#bot-runtime-multi-agents)
 - [Workflows](#workflows)
 - [Schéma de la base de données](#schéma-de-la-base-de-données)
@@ -86,288 +85,70 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 
 ---
 
-## Prérequis
+## Prérequis express
 
-### Système
-- Linux (testé sur Ubuntu 22.04+)
-- Node.js **22 LTS** (via `nvm` recommandé)
-- pnpm **10+** : `npm install -g --prefix=/usr pnpm`
-- Docker + Docker Compose (pour Postgres pgvector)
-- Redis natif **6+** (`apt install redis-server`)
-- nginx ou autre reverse-proxy pour la prod (TLS)
+> 📘 **Pour un déploiement détaillé, suivre [`DEPLOYMENT.md`](DEPLOYMENT.md).**
+> Ce qui suit est la liste résumée pour vérifier qu'on a bien tout sous la main.
+
+### Côté machine
+- Ubuntu 22.04 LTS+, Node.js **22 LTS**, pnpm **10+**, Docker + Compose, Redis 6+, nginx, certificat TLS
 
 ### Services externes
-- **Synapse / Matrix** déployé et joignable en HTTP local
-- **Compte Synapse admin** avec un access token dédié (utilisé pour provisionner les agents)
-- **Moodle 4.x** avec **Web Services activés** et un **service externe** créé pour aibotmanager (cf. section [Moodle — service Web Services](#moodle--service-web-services) plus bas)
-- **Plugin [`mod_matrix` (Famedly)](https://github.com/element-hq/moodle-mod_matrix)** installé sur chaque Moodle, si on veut détecter les activités Matrix créées depuis les cours
-- **Realm Keycloak** **obligatoire** avec un client OIDC dont le `redirect URI` pointe vers `<base-url>/api/auth/callback/keycloak` (provider unique : pas de fallback credentials)
-- **Clé API Anthropic** (`ANTHROPIC_API_KEY`) — provider LLM principal, requis pour le mode tool-calling RAG
-- **Serveur Ollama (compat OpenAI)** — requis pour :
-  - les **embeddings** RAG (recommandé : `nomic-embed-text` 768-dim sur GPU)
-  - optionnellement un **LLM secondaire** (ex. `gemma3:12b`) sélectionnable au niveau de l'agent
+- **Synapse Matrix** déployé + access_token admin
+- **Postgres 15 + pgvector 0.8** (image `pgvector/pgvector:pg15`)
+- **Keycloak realm** avec client OIDC `aibotmanager` + **mapper `affiliation`** sur l'id_token (sinon tous les users sont rejetés)
+- **Moodle 4.x** avec service WS dédié + 6 fonctions WS (cf. [DEPLOYMENT.md §5](DEPLOYMENT.md#étape-5--moodle))
+- **Plugin [`mod_matrix` (Famedly)](https://github.com/element-hq/moodle-mod_matrix)** sur chaque Moodle
+- **Ollama** compat OpenAI avec `nomic-embed-text` chargé
+- **Clé API Anthropic**
 
-### Moodle — service Web Services
-
-aibotmanager interroge chaque Moodle via un **service externe dédié** (par exemple `BBBmanager`) avec un compte service (rôle Manager au niveau site). Crée le service dans *Site administration → Server → Web services → External services → Add*.
-
-**Réglages du service :**
-
-| Option | Valeur | Pourquoi |
-|---|---|---|
-| Enabled | ✅ | Indispensable |
-| Authorized users only | ✅ | Limite à un compte service dédié |
-| Can download files | ✅ | Requis pour extraire les PDF/DOCX dans le RAG (sinon `accessexception` au téléchargement) |
-| Can upload files | ❌ | Non utilisé |
-
-**Fonctions à ajouter** (onglet *Functions*) :
-
-| Fonction WS | Où c'est utilisé | Obligatoire ? |
-|---|---|:---:|
-| `core_course_get_courses_by_field` | Sync des cours d'une plateforme (`/moodle/[id]` → bouton 🔄) | ✅ |
-| `core_course_get_contents` | Sync structurel d'un cours (sections + modules) pour le RAG | ✅ |
-| `core_user_get_users_by_field` | Résolution rôle ENSEIGNANT : retrouver l'user Moodle à partir de son email Keycloak | ✅ (si ENSEIGNANT activé) |
-| `core_enrol_get_users_courses` | Liste des cours où l'utilisateur est inscrit | ✅ (si ENSEIGNANT activé) |
-| `core_enrol_get_enrolled_users` | Lecture des rôles Moodle dans un cours (filtre `editingteacher`/`teacher`) | ✅ (si ENSEIGNANT activé) |
-| `mod_matrix_get_matrices_by_courses` | Sync des activités Matrix (mod_matrix Famedly) → lien Room ↔ Cours | ✅ (si mod_matrix utilisé) |
-
-> ℹ️ Sans `mod_matrix_get_matrices_by_courses`, les rooms créées depuis Moodle resteront en `source=MATRIX` (non liées au cours) et l'ENSEIGNANT ne les verra pas dans `/mes-cours` ni dans `/rooms`.
-
-> ℹ️ Sans les 3 fonctions `core_user_*` et `core_enrol_*`, le rôle **ENSEIGNANT** ne fonctionnera pas — la résolution des cours où l'utilisateur est prof se fera silencieusement vide (`/mes-cours` affichera "Aucun cours trouvé").
-
-**Génération du token :** *Site administration → Server → Web services → Manage tokens → Create token*, en sélectionnant le service `BBBmanager` et le compte service. Reporte la valeur dans l'UI `/moodle/new` (le token est chiffré AES-256-GCM en DB).
-
-**Vérification rapide** depuis le serveur :
+### Vérifier les fonctions WS Moodle activées sur un token
 
 ```bash
-pnpm exec tsx scripts/test-moodle-functions.ts   # liste toutes les fonctions autorisées par le token
+pnpm exec tsx scripts/test-moodle-functions.ts
 ```
-
----
-
-## Installation
-
-### 1. Récupérer le code
-
-```bash
-sudo mkdir -p /var/www/html/aimatrixmanager
-sudo chown -R $USER:$USER /var/www/html/aimatrixmanager
-cd /var/www/html/aimatrixmanager
-# (cloner ou copier les sources ici)
-pnpm install
-```
-
-### 2. Préparer Postgres avec pgvector
-
-Si tu as déjà un conteneur `postgres:15`, switche son image vers `pgvector/pgvector:pg15` (compatible binaire, pas de perte de données) :
-
-```bash
-# Backup avant modification
-sudo docker exec synapse-postgres pg_dumpall -U <admin_user> > /tmp/pgbackup.sql
-
-# Dans /opt/.../docker-compose.yml :
-#   image: postgres:15  →  image: pgvector/pgvector:pg15
-sudo docker compose up -d postgres
-
-# Vérifier
-sudo docker exec synapse-postgres psql -U <admin_user> -d postgres \
-  -c "SELECT * FROM pg_available_extensions WHERE name='vector';"
-```
-
-### 3. Créer la DB et le user dédiés
-
-```bash
-DB_PASS=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)
-echo "$DB_PASS"  # à reporter dans .env
-
-sudo docker exec synapse-postgres psql -U <admin_user> -d postgres <<EOF
-CREATE USER aimatrix_user WITH PASSWORD '$DB_PASS';
-CREATE DATABASE aimatrixmanager OWNER aimatrix_user;
-EOF
-
-sudo docker exec synapse-postgres psql -U <admin_user> -d aimatrixmanager <<EOF
-CREATE EXTENSION vector;
-GRANT ALL PRIVILEGES ON SCHEMA public TO aimatrix_user;
-EOF
-```
-
-### 4. Variables d'environnement
-
-```bash
-cp .env.example .env
-# remplir les valeurs (voir section ci-dessous)
-chmod 600 .env
-```
-
-### 5. Schéma + admin initial
-
-```bash
-pnpm db:push                  # crée les 11 tables
-pnpm db:seed                  # crée l'admin local depuis ADMIN_INITIAL_*
-```
-
-### 6. Build et lancer
-
-```bash
-pnpm build
-pnpm start                    # ou via systemd (voir plus bas)
-```
-
----
-
-## Configuration `.env`
-
-```bash
-# ─── PostgreSQL ─────────────────────────────────────────────────
-DATABASE_URL="postgresql://aimatrix_user:CHANGEME@127.0.0.1:5432/aimatrixmanager?schema=public"
-
-# ─── NextAuth ───────────────────────────────────────────────────
-AUTH_SECRET=""                # openssl rand -base64 32
-AUTH_TRUST_HOST="true"
-NEXTAUTH_URL="https://ai.example.com"   # prod uniquement
-
-# ─── Admin initial (legacy — provider Credentials supprimé) ─────
-# Le seed crée encore un compte ADMIN avec ces valeurs, mais comme
-# l'auth est Keycloak-only ce compte ne peut pas se logger via /login.
-# Le bootstrap normal est : 1er user Keycloak → promu ADMIN auto.
-# Garde ces vars si tu veux pré-créer un ADMIN avec un email Keycloak
-# spécifique avant qu'il se connecte (le compte sera ensuite lié au
-# moment du 1er SSO grâce à `allowDangerousEmailAccountLinking`).
-ADMIN_INITIAL_EMAIL="admin@example.com"
-ADMIN_INITIAL_PASSWORD="ChangeMeNow!"
-
-# ─── Keycloak (OBLIGATOIRE — provider unique) ───────────────────
-KEYCLOAK_ISSUER="https://keycloak.example.com/realms/EXAMPLE"
-KEYCLOAK_CLIENT_ID="aibotmanager"
-KEYCLOAK_CLIENT_SECRET=""
-
-# ─── Redis ──────────────────────────────────────────────────────
-# Sert au cache, au rate-limit ET à BullMQ (queue d'indexation RAG).
-REDIS_URL="redis://127.0.0.1:6379"
-
-# ─── Logs ───────────────────────────────────────────────────────
-LOG_LEVEL="info"
-
-# ─── Matrix / Synapse ───────────────────────────────────────────
-MATRIX_HOMESERVER="http://127.0.0.1:8008"
-MATRIX_SERVER_NAME="matrix.example.com"
-SYNAPSE_ADMIN_TOKEN=""
-
-# ─── Chiffrement secrets DB (AES-256-GCM, NE JAMAIS PERDRE) ─────
-WS_TOKEN_ENCRYPTION_KEY=""    # openssl rand -base64 32
-
-# ─── Anthropic (LLM principal + RAG tool-mode) ──────────────────
-ANTHROPIC_API_KEY=""
-
-# ─── Ollama (embeddings + LLM secondaire) ───────────────────────
-# Endpoint compat OpenAI. Requis pour le RAG (embeddings) et utilisé
-# en mode naïf pour les agents Ollama. Absent = état "warn" dans le
-# dashboard "État des services" et indexation RAG impossible.
-OLLAMA_BASE_URL="https://fromager.example.com"
-OLLAMA_API_KEY=""
-OLLAMA_EMBED_MODEL="nomic-embed-text"     # défaut, peut être omis
-```
-
-> ⚠️ **`WS_TOKEN_ENCRYPTION_KEY`** chiffre les `wsToken` Moodle et les `matrixAccessToken` des agents. Si tu la perds, tous ces secrets stockés sont irrécupérables (à re-saisir manuellement). Sauvegarde-la dans un coffre-fort dès la mise en prod.
-
-> Les **plateformes Moodle** (DISI, P11STN…) **ne sont pas dans `.env`** — elles se gèrent dans l'UI `/moodle`.
 
 ---
 
 ## Lancer en développement
 
 ```bash
-pnpm dev                                  # http://localhost:3000
+pnpm install --frozen-lockfile
+cp .env.example .env && chmod 600 .env   # remplir les valeurs (cf. DEPLOYMENT.md §7.3)
+pnpm db:push                              # 17 tables
+pnpm dev                                  # http://localhost:3000 (Turbopack)
 ```
 
-Hot-reload via Turbopack. Les changements de schéma Prisma nécessitent `pnpm db:push && pnpm exec prisma generate`.
+Hot-reload Turbopack. Les changements de schéma Prisma nécessitent `pnpm db:push && pnpm exec prisma generate`.
 
-### Test smoke (DB + Redis + Prisma)
-
-```bash
-pnpm exec tsx scripts/smoke-test.ts
-```
-
-### Test Moodle Web Services
+### Tests smoke (sans bot Matrix)
 
 ```bash
-pnpm exec tsx scripts/test-moodle.ts
-pnpm exec tsx scripts/test-moodle-functions.ts   # liste les fonctions WS dispo
+pnpm exec tsx scripts/smoke-test.ts                # DB + Redis + Prisma
+pnpm exec tsx scripts/test-moodle.ts               # WS Moodle (toutes plateformes actives)
+pnpm exec tsx scripts/test-moodle-functions.ts     # fonctions WS autorisées par chaque token
 ```
 
 ---
 
-## Déploiement production (systemd)
-
-### Service unit
-
-`/etc/systemd/system/aimatrixmanager.service` :
-
-```ini
-[Unit]
-Description=aibotmanager — gestion des agents IA Matrix
-After=network.target
-
-[Service]
-User=pabn
-Group=pabn
-WorkingDirectory=/var/www/html/aimatrixmanager
-Environment="NODE_ENV=production"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
-ExecStart=/usr/bin/pnpm start
-Restart=always
-RestartSec=10
-StartLimitIntervalSec=60
-StartLimitBurst=3
-LimitNOFILE=50000
-StandardOutput=append:/var/log/aimatrixmanager_output.log
-StandardError=append:/var/log/aimatrixmanager_error.log
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Activation
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now aimatrixmanager
-sudo systemctl status aimatrixmanager
-```
-
-### Cycle de mise à jour
+## Mise à jour code (cycle prod)
 
 ```bash
 cd /var/www/html/aimatrixmanager
-git pull                           # ou rsync
+git pull
 pnpm install --frozen-lockfile
 pnpm exec prisma generate
 pnpm db:push                       # si le schéma a changé
 pnpm build
 sudo systemctl restart aimatrixmanager
-sudo tail -f /var/log/aimatrixmanager_output.log
+
+# Uniquement si le code Python du bot a changé (pas pour un nouvel
+# agent / un changement de prompt — ça, c'est hot-rechargé tout seul) :
+cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
 ```
 
-### Reverse proxy nginx (extrait)
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name ai.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/ai.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/ai.example.com/privkey.pem;
-
-    location / {
-        proxy_pass         http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-    }
-}
-```
+Pour un déploiement initial complet (machine vierge) ou la rotation de
+secrets, voir [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
@@ -464,20 +245,7 @@ cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
    le reconcile loop prend la nouvelle assignation au tick suivant
 ```
 
-### Cycle de mise à jour code
-
-```bash
-cd /var/www/html/aimatrixmanager
-git pull
-pnpm install --frozen-lockfile
-pnpm exec prisma generate
-pnpm db:push                     # si le schéma a changé
-pnpm build
-sudo systemctl restart aimatrixmanager
-# Uniquement si le code Python du bot a changé (pas pour un nouvel
-# agent / un changement de prompt — ça, c'est hot-rechargé tout seul) :
-cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
-```
+> Pour le cycle de mise à jour du code → section [Mise à jour code (cycle prod)](#mise-à-jour-code-cycle-prod) plus haut.
 
 ---
 
@@ -606,12 +374,10 @@ Logs **pino** redactent automatiquement `*.password`, `*.token`, `*.access_token
 | `pnpm lint` | ESLint |
 | `pnpm db:push` | Sync schema Prisma → Postgres (dev) |
 | `pnpm db:studio` | Prisma Studio sur la DB |
-| `pnpm db:seed` | Crée/met à jour l'admin initial |
-| `pnpm user:password <email> [pwd]` | Reset password d'un user local |
 | `pnpm exec tsx scripts/smoke-test.ts` | Vérifie DB + Redis + Prisma |
 | `pnpm exec tsx scripts/test-moodle.ts` | Teste les WS Moodle (toutes plateformes actives) |
 | `pnpm exec tsx scripts/test-moodle-functions.ts` | Liste les fonctions WS autorisées par le token |
-| `pnpm exec tsx scripts/migrate-ws-tokens.ts` | Chiffre les tokens Moodle encore en clair |
+| `pnpm exec tsx scripts/cross-signing.ts setup <slug>` | Initialise le cross-signing E2EE d'un agent (évite le bouclier rouge Element) |
 
 ---
 
