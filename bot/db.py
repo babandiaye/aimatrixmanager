@@ -75,6 +75,43 @@ async def list_enabled_agents() -> list[AgentRow]:
     ]
 
 
+async def get_or_create_dm_room(matrix_room_id: str) -> str:
+    """Pour les conversations en DM : on n'exige pas de `RoomAgent` (un DM
+    est une convo explicite initiée par l'user avec le bot — aucune raison
+    de la bloquer faute d'assignation manuelle UI). On s'assure juste que
+    la `Room` existe en DB pour pouvoir tracer dans AuditLog. Retourne le
+    PK Postgres de la Room.
+
+    Si la Room existe déjà (cas nominal après un sync ou une création
+    précédente), on la met à jour isDirect=true au passage (par sécurité,
+    si elle a été créée avant via sync mod_matrix ou autre).
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        'SELECT id FROM "Room" WHERE "matrixRoomId" = $1',
+        matrix_room_id,
+    )
+    if row:
+        return row["id"]
+    new_id = "room_" + secrets.token_hex(12)
+    await pool.execute(
+        """
+        INSERT INTO "Room" (id, "matrixRoomId", "isDirect", source,
+                            "discoveredAt", "updatedAt")
+        VALUES ($1, $2, true, 'MATRIX', NOW(), NOW())
+        ON CONFLICT ("matrixRoomId") DO NOTHING
+        """,
+        new_id,
+        matrix_room_id,
+    )
+    # Relit pour gérer le cas race (deux DMs concurrents pour le même room_id).
+    row = await pool.fetchrow(
+        'SELECT id FROM "Room" WHERE "matrixRoomId" = $1',
+        matrix_room_id,
+    )
+    return row["id"]
+
+
 async def get_room_assignment(
     agent_id: str, matrix_room_id: str
 ) -> Optional[dict]:

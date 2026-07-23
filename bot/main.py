@@ -56,6 +56,20 @@ MAX_HISTORY = int(os.getenv("MAX_HISTORY", "20"))
 REJOIN_COOLDOWN_SEC = int(os.getenv("REJOIN_COOLDOWN_SEC", "300"))   # 5 min
 REJOIN_MAX_FAILS = int(os.getenv("REJOIN_MAX_FAILS", "3"))
 
+# ── Onboarding invitation externe ─────────────────────────────────────────────
+# Quand un user externe (Element direct) invite le bot dans un salon de groupe
+# sans passer par l'UI aibotmanager, aucune `RoomAgent` n'existe → le bot
+# resterait silencieux à toutes les questions. On accepte l'invitation, on
+# poste un message d'accueil expliquant la config nécessaire, puis on quitte
+# le salon si aucune assignation n'apparaît dans WELCOME_GRACE_SEC.
+# Les DM (≤ 2 users) sont exclues : elles fonctionnent nativement sans
+# RoomAgent (cf. handle_text).
+WELCOME_GRACE_SEC = int(os.getenv("WELCOME_GRACE_SEC", "300"))       # 5 min
+WELCOME_SYNC_DELAY_SEC = int(os.getenv("WELCOME_SYNC_DELAY_SEC", "5"))
+PUBLIC_APP_URL = os.getenv(
+    "PUBLIC_APP_URL", "https://preprod-aibotmanager.unchk.sn"
+).rstrip("/")
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -496,24 +510,41 @@ class AgentRunner:
         if not body:
             return
 
-        # 1. La room est-elle assignée à cet agent et active ?
-        ra = await db.get_room_assignment(self.row.id, room.room_id)
-        if not ra:
-            return  # pas pour cet agent
-        if not ra["enabled"]:
-            return
-
-        # 2. DM = toujours répondre, groupe = mention requise
+        # 1. Routage DM vs groupe.
+        #    - DM = conversation explicite avec ce bot. Pas besoin d'une
+        #      `RoomAgent` (un DM n'est pas créé via l'UI d'affectation,
+        #      c'est l'user qui ouvre la conv côté Element). On crée la
+        #      Room à la volée si nécessaire pour l'audit.
+        #    - Groupe = `RoomAgent` enabled requis + mention obligatoire.
         in_dm = self.is_dm(room)
-        if not in_dm and not self.is_mentioned(event, body):
-            return
-        if not in_dm:
+
+        if in_dm:
+            try:
+                room_pk = await db.get_or_create_dm_room(room.room_id)
+            except Exception as e:
+                self.log.error(f"DM get_or_create_dm_room : {e}")
+                return
+            # Pas de RAG en DM (pas de cours lié)
+            course_db_id: Optional[str] = None
+            rag_enabled = False
+        else:
+            ra = await db.get_room_assignment(self.row.id, room.room_id)
+            if not ra:
+                return  # pas pour cet agent
+            if not ra["enabled"]:
+                return
+            if not self.is_mentioned(event, body):
+                return
             body = self.strip_mention(body)
             if not body:
                 return
+            room_pk = ra["room_id"]
+            course_db_id = ra.get("moodleCourseId")
+            rag_enabled = bool(ra.get("rag_enabled"))
 
         self.log.info(
-            f"{event.sender} → {room.room_id[:25]} : {body[:80]}"
+            f"{event.sender} → {room.room_id[:25]} "
+            f"[{'DM' if in_dm else 'GROUP'}] : {body[:80]}"
         )
 
         t0 = time.monotonic()
@@ -521,13 +552,11 @@ class AgentRunner:
         usage = {}
         err = None
         try:
-            # Streaming + RAG : si la room est liée à un cours Moodle avec
-            # reindexEnabled, on retrieve d'abord les chunks pertinents.
             answer, usage = await self.ask_llm_streaming(
                 room.room_id,
                 body,
-                course_db_id=ra.get("moodleCourseId"),
-                rag_enabled=bool(ra.get("rag_enabled")),
+                course_db_id=course_db_id,
+                rag_enabled=rag_enabled,
             )
         except Exception as e:
             err = str(e)
@@ -538,7 +567,7 @@ class AgentRunner:
         # Audit
         try:
             await db.insert_audit_log(
-                room_pk=ra["room_id"],
+                room_pk=room_pk,
                 agent_id=self.row.id,
                 matrix_event_id=event.event_id,
                 sender_mxid=event.sender,
@@ -569,7 +598,96 @@ class AgentRunner:
         if event.state_key != self.row.matrix_user_id:
             return
         self.log.info(f"Invitation reçue → {room.room_id}")
-        await self.client.join(room.room_id)
+        try:
+            await self.client.join(room.room_id)
+        except Exception as e:
+            self.log.error(f"Join {room.room_id[:25]} : {e}")
+            return
+        # Post-join : DM → OK ; groupe sans assignation → accueil + grace.
+        # Lancé en task pour ne pas bloquer le callback (le sleep initial
+        # laisse la sync remonter le state complet du salon).
+        asyncio.create_task(self._welcome_or_leave(room.room_id))
+
+    async def _welcome_or_leave(self, room_id: str) -> None:
+        """Après un join sur invitation, décide de rester ou partir.
+
+        - DM (≤ 2 users) : silencieux, la conv marche via `handle_text`.
+        - Groupe avec `RoomAgent` enabled : silencieux, cas nominal (rare
+          — l'admin a assigné en amont puis quelqu'un a réinvité).
+        - Groupe sans `RoomAgent` : poste un accueil qui explique la config
+          via l'UI aibotmanager, puis quitte le salon au bout de
+          WELCOME_GRACE_SEC si toujours rien en DB.
+
+        Ne poste pas de message d'adieu : le silence à la sortie limite le
+        bruit dans les salons pédagogiques.
+        """
+        # Laisse à la sync le temps de remonter le state complet (membres
+        # + encryption + power levels). Sans ce délai, `is_dm` peut voir 1
+        # seul user (le bot) juste après le join.
+        await asyncio.sleep(WELCOME_SYNC_DELAY_SEC)
+        room = self.client.rooms.get(room_id)
+        if room is None:
+            self.log.warning(
+                f"Post-join {room_id[:25]} : room introuvable côté client, skip"
+            )
+            return
+
+        if self.is_dm(room):
+            self.log.info(f"Post-join {room_id[:25]} : DM, aucun message d'accueil")
+            return
+
+        try:
+            ra = await db.get_room_assignment(self.row.id, room_id)
+        except Exception as e:
+            self.log.warning(f"Post-join {room_id[:25]} : lookup RoomAgent : {e}")
+            ra = None
+        if ra and ra["enabled"]:
+            self.log.info(
+                f"Post-join {room_id[:25]} : RoomAgent déjà présent, no-op"
+            )
+            return
+
+        welcome = (
+            f"👋 Bonjour ! Je suis **{self.row.name}**, un agent IA de l'UN-CHK.\n"
+            "\n"
+            "Je viens d'être invité dans ce salon mais je ne suis pas encore "
+            "configuré pour y répondre.\n"
+            "\n"
+            "Un enseignant doit m'assigner à ce salon via :\n"
+            f"🔗 {PUBLIC_APP_URL}/rooms\n"
+            "\n"
+            f"⏱ Sans assignation dans les {WELCOME_GRACE_SEC // 60} minutes, "
+            "je quitterai automatiquement le salon."
+        )
+        await self.send(room_id, welcome)
+        self.log.info(
+            f"Post-join {room_id[:25]} : accueil posté, "
+            f"leave planifié dans {WELCOME_GRACE_SEC}s"
+        )
+
+        await asyncio.sleep(WELCOME_GRACE_SEC)
+        try:
+            ra = await db.get_room_assignment(self.row.id, room_id)
+        except Exception as e:
+            self.log.warning(
+                f"Post-join {room_id[:25]} : re-check RoomAgent : {e}"
+            )
+            return
+        if ra and ra["enabled"]:
+            self.log.info(
+                f"Post-join {room_id[:25]} : assignation créée pendant "
+                "le délai, je reste"
+            )
+            return
+
+        try:
+            await self.client.room_leave(room_id)
+            self.log.info(
+                f"Post-join {room_id[:25]} : leave effectué "
+                "(aucune assignation après grace period)"
+            )
+        except Exception as e:
+            self.log.warning(f"Post-join {room_id[:25]} : leave a échoué : {e}")
 
     # ── Auto-rejoin sur kick ─────────────────────────────────────────────────
     # Quand le bot perd son membership (kick admin), Synapse pousse un event
