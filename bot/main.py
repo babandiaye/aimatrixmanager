@@ -9,6 +9,7 @@ Chaque agent ne répond que :
 Logs des conversations dans `AuditLog`.
 """
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -1037,6 +1038,45 @@ async def reconcile_loop(
 # Main — orchestrateur
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Verrou global — file descriptor gardé ouvert pour toute la vie du process.
+# Ne PAS le fermer/GC : la libération du descripteur relâche le lock fcntl.
+_STORE_LOCK_FD: Optional[IO] = None
+
+
+def _acquire_store_lock() -> None:
+    """Verrou exclusif au boot pour empêcher deux runs concurrents.
+
+    Deux instances du bot pointant sur le même `$STORE_PATH` corromperaient
+    les stores olm (matrix-nio n'a pas de synchro inter-process pour les
+    keys/one-time-keys). Ce lock est cheap : `fcntl.flock` sur un fichier
+    dans `$STORE_PATH/.lock`, non-bloquant. Si un autre process tient déjà
+    le verrou (ex: `docker compose` ET un `python main.py` local pointés
+    sur le même volume), on sort en exit 2 avec un message explicite.
+
+    Le lock est libéré automatiquement quand le process meurt (kernel).
+    """
+    global _STORE_LOCK_FD
+    lock_path = os.path.join(STORE_ROOT, ".lock")
+    try:
+        fd = open(lock_path, "w")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as e:
+        log.error(
+            f"Impossible d'acquérir le verrou {lock_path} : {e}. "
+            "Une autre instance du bot tourne probablement déjà sur ce STORE_PATH. "
+            "Deux runs concurrents corromperaient les stores olm — sortie."
+        )
+        sys.exit(2)
+    _STORE_LOCK_FD = fd
+    # Trace le pid pour faciliter le debug (ex: 'kill $(cat .lock)').
+    try:
+        fd.write(f"{os.getpid()}\n")
+        fd.flush()
+    except OSError:
+        pass
+    log.info(f"🔒 Verrou store acquis : {lock_path} (pid={os.getpid()})")
+
+
 async def main():
     if not os.getenv("DATABASE_URL"):
         log.error("DATABASE_URL non défini")
@@ -1050,6 +1090,7 @@ async def main():
         sys.exit(1)
 
     Path(STORE_ROOT).mkdir(parents=True, exist_ok=True)
+    _acquire_store_lock()
 
     agents = await db.list_enabled_agents()
     log.info(

@@ -133,13 +133,23 @@ Grâce au `reconcile_loop` (60s) et au `heartbeat_loop` :
 
 Le code ne logge jamais les tokens — la lib `pino` côté Next.js a une redaction, ici on évite simplement les `print(token)` côté Python.
 
+## Verrou anti double-instance
+
+Au boot, le bot pose un verrou exclusif `fcntl.flock` sur `$STORE_PATH/.lock`. Deux runs concurrents pointés sur le même `STORE_PATH` corromperaient les stores olm (matrix-nio ne partage pas ses one-time-keys entre process). Si le verrou est déjà pris, le bot loggue une erreur explicite et sort en **exit code 2**.
+
+Le verrou est libéré automatiquement quand le process meurt (le kernel relâche le `flock` au moment du close du fd). Aucun cleanup manuel n'est requis même après un `SIGKILL`.
+
+Cas d'usage à surveiller :
+- lancer `python main.py` en local alors que `bot-ia` tourne déjà via `docker compose` en pointant sur le même volume → le second échoue proprement
+- passer le container en mode `restart: always` ET ré-exécuter un `docker run` manuel → idem
+
 ## Troubleshooting
 
 ### Le bot ne démarre pas
 ```bash
 sudo docker logs bot-ia --tail 50
 ```
-Vérifier `DATABASE_URL` et `WS_TOKEN_ENCRYPTION_KEY` dans `/opt/matrix-synapse/.env`.
+Vérifier `DATABASE_URL` et `WS_TOKEN_ENCRYPTION_KEY` dans `/opt/matrix-synapse/.env`. Si le log mentionne `Impossible d'acquérir le verrou`, un autre process tient déjà le lock — trouver son PID via `cat $STORE_PATH/.lock` puis l'arrêter.
 
 ### Un agent ne répond pas
 1. Statut `ENABLED` côté UI ? (`/agents`)
