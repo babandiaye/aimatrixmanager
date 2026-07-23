@@ -13,6 +13,8 @@ import {
   BookOpenIcon,
   UserGroupIcon,
   Cog6ToothIcon,
+  QuestionMarkCircleIcon,
+  SignalIcon,
 } from "@heroicons/react/24/outline";
 
 type NavItem = {
@@ -55,12 +57,18 @@ const NAV: NavItem[] = [
     icon: UserGroupIcon,
     requiresAny: ["users.manage"],
   },
+  // Status : santé des services + modèles Ollama + alertes agents.
+  // Visible pour tous les rôles connectés (pas de requiresAny).
+  { href: "/status", label: "Status", icon: SignalIcon },
   {
     href: "/settings",
     label: "Paramètres",
     icon: Cog6ToothIcon,
     requiresAny: ["settings.manage"],
   },
+  // Aide & contact DITSI : visible pour tous les rôles connectés
+  // (pas de requiresAny → toujours rendu).
+  { href: "/help", label: "Aide", icon: QuestionMarkCircleIcon },
 ];
 
 export function Sidebar({ role }: { role: UserRole }) {
@@ -73,18 +81,15 @@ export function Sidebar({ role }: { role: UserRole }) {
     <aside className="w-52 shrink-0 border-r border-sidebar-border bg-sidebar">
       <Link
         href="/"
-        className="flex h-16 flex-col items-start justify-center gap-0.5 border-b border-sidebar-border px-4 transition-colors hover:bg-muted/30"
+        className="flex h-24 items-center justify-center border-b border-sidebar-border px-4 transition-colors hover:bg-muted/30"
         title="Accueil AI Bot Manager"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/logo-unchk.png"
-          alt="UN-CHK"
-          className="h-8 w-auto"
+          src="/logo-aibotmanager.png"
+          alt="AI Bot Manager"
+          className="h-20 w-auto"
         />
-        <span className="text-[10px] font-medium tracking-wider text-muted-foreground">
-          AI Bot Manager
-        </span>
       </Link>
       <nav className="p-2">
         {items.map((item) => {

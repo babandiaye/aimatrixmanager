@@ -64,7 +64,8 @@ export default async function UsersPage({
           <CardTitle>{total} compte(s)</CardTitle>
           <CardDescription>
             Les comptes Keycloak sont créés automatiquement à la première
-            connexion (rôle <code>AUDITOR</code> par défaut).
+            connexion (rôle <code>ENSEIGNANT</code> par défaut, filtre
+            d&apos;affiliation appliqué côté Keycloak/UN-CHK).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -76,6 +77,7 @@ export default async function UsersPage({
                 <TableHead>Rôle</TableHead>
                 <TableHead>Provider</TableHead>
                 <TableHead>Créé le</TableHead>
+                <TableHead>Dernière connexion</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -85,9 +87,7 @@ export default async function UsersPage({
                 const isLastAdmin = u.role === "ADMIN" && adminCount <= 1;
                 const providers = u.accounts.length
                   ? u.accounts.map((a) => a.provider).join(", ")
-                  : u.passwordHash
-                    ? "Local (urgence)"
-                    : "—";
+                  : "—";
                 return (
                   <TableRow key={u.id}>
                     <TableCell className="font-mono text-xs">
@@ -119,6 +119,25 @@ export default async function UsersPage({
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {u.createdAt.toLocaleDateString("fr-FR")}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {u.lastLoginAt ? (
+                        <div className="space-y-0.5">
+                          <div>
+                            {u.lastLoginAt.toLocaleString("fr-FR", {
+                              dateStyle: "short",
+                              timeStyle: "short",
+                            })}
+                          </div>
+                          {u.lastLoginIp && (
+                            <div className="font-mono text-[10px]">
+                              {u.lastLoginIp}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        "—"
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <UserActions

@@ -32,10 +32,11 @@ export default async function SettingsPage() {
           <CardTitle>Authentification</CardTitle>
           <CardDescription>
             AI Bot Manager utilise <strong>Keycloak UNCHK</strong> comme unique
-            fournisseur d&apos;identité. Les rôles sont gérés en base après la
-            première connexion (le tout premier utilisateur est promu
-            automatiquement <code>ADMIN</code>, les suivants arrivent en{" "}
-            <code>AUDITOR</code>).
+            fournisseur d&apos;identité, avec un filtre d&apos;affiliation
+            (seul le <code>Personnel</code> UN-CHK est admis). Les rôles sont
+            gérés en base après la première connexion : le tout premier
+            utilisateur est promu automatiquement <code>ADMIN</code>, les
+            suivants arrivent en <code>ENSEIGNANT</code> par défaut.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

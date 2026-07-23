@@ -26,7 +26,9 @@ import {
   PlusIcon,
   ShieldCheckIcon,
   ShieldExclamationIcon,
+  ExclamationTriangleIcon,
 } from "@heroicons/react/24/outline";
+import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
 import { AgentRowActions } from "./row-actions";
 
 const PAGE_SIZE = 10;
@@ -50,7 +52,7 @@ export default async function AgentsPage({
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
   const where = agentWhereFor(session.user.role, session.user.id);
-  const [total, agents] = await Promise.all([
+  const [total, agents, ollamaModels] = await Promise.all([
     prisma.agent.count({ where }),
     prisma.agent.findMany({
       where,
@@ -64,7 +66,11 @@ export default async function AgentsPage({
         },
       },
     }),
+    // Ollama : cache 60s côté Next (cf. listOllamaModels()). Set utilisé
+    // pour signaler les agents qui pointent vers un modèle disparu.
+    isOllamaConfigured() ? listOllamaModels() : Promise.resolve([]),
   ]);
+  const availableOllamaModels = new Set(ollamaModels.map((m) => m.name));
 
   return (
     <div className="space-y-6">
@@ -132,10 +138,15 @@ export default async function AgentsPage({
                   return (
                     <TableRow key={a.id}>
                       <TableCell className="font-mono text-xs">
-                        <div>{a.slug}</div>
-                        <div className="text-[10px] text-muted-foreground">
-                          {a.matrixUserId}
-                        </div>
+                        <Link
+                          href={`/agents/${a.id}`}
+                          className="hover:underline"
+                        >
+                          <div>{a.slug}</div>
+                          <div className="text-[10px] text-muted-foreground">
+                            {a.matrixUserId}
+                          </div>
+                        </Link>
                       </TableCell>
                       <TableCell>
                         <div>{a.name}</div>
@@ -146,7 +157,19 @@ export default async function AgentsPage({
                         )}
                       </TableCell>
                       <TableCell className="font-mono text-xs">
-                        {a.model}
+                        <div className="inline-flex items-center gap-1.5">
+                          {a.model}
+                          {a.provider === "OLLAMA" &&
+                            availableOllamaModels.size > 0 &&
+                            !availableOllamaModels.has(a.model) && (
+                              <span
+                                title={`Le modèle "${a.model}" n'est plus disponible sur Ollama. Voir /status pour la liste des modèles.`}
+                                className="inline-flex items-center text-status-error"
+                              >
+                                <ExclamationTriangleIcon className="size-3.5" />
+                              </span>
+                            )}
+                        </div>
                       </TableCell>
                       <TableCell className="text-sm">
                         {a._count.assignments}

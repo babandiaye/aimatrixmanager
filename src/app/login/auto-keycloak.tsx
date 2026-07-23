@@ -20,7 +20,11 @@ export function AutoKeycloak({
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-4">
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src="/logo-unchk.png" alt="UN-CHK" className="h-12 w-auto" />
+      <img
+        src="/logo-aibotmanager.png"
+        alt="AI Bot Manager"
+        className="h-24 w-auto"
+      />
 
       {error && (
         <div className="max-w-md rounded-lg bg-status-error/10 p-4 text-sm text-status-error">

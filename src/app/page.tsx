@@ -127,9 +127,9 @@ export default async function LandingPage() {
           <div className="flex items-center gap-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/logo-unchk.png"
-              alt="UN-CHK"
-              className="h-9 w-auto"
+              src="/logo-aibotmanager.png"
+              alt="AI Bot Manager"
+              className="h-10 w-auto"
             />
           </div>
           <div className="flex items-center gap-3">
