@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { can } from "@/lib/permissions";
 import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
+import { getServerName } from "@/lib/synapse-admin";
 import {
   Card,
   CardContent,
@@ -16,7 +17,7 @@ export default async function NewAgentPage() {
   if (!session?.user) redirect("/login");
   if (!can(session.user.role, "agents.create")) redirect("/agents");
 
-  const serverName = process.env.MATRIX_SERVER_NAME ?? "matrix.example.com";
+  const serverName = getServerName();
   const ollamaEnabled = isOllamaConfigured();
   const ollamaModels = ollamaEnabled ? await listOllamaModels() : [];
 

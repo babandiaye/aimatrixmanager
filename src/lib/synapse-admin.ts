@@ -23,6 +23,17 @@ export function buildMxid(localpart: string): string {
   return `@${localpart}:${serverName}`;
 }
 
+/**
+ * Retourne le nom de domaine du homeserver Matrix (partie après `:` d'un MXID).
+ * Fail-fast si `MATRIX_SERVER_NAME` est absent — un fallback silencieux
+ * afficherait un MXID invalide dans les pages `/agents/new` et
+ * `/agents/[id]/edit`, ce qui casserait la création de compte Synapse et le
+ * cross-signing en aval.
+ */
+export function getServerName(): string {
+  return getEnv().serverName;
+}
+
 async function call<T>(
   path: string,
   init?: { method?: string; body?: unknown },

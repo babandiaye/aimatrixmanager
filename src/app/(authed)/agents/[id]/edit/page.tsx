@@ -3,6 +3,7 @@ import { auth } from "@/auth";
 import { canAny } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
+import { getServerName } from "@/lib/synapse-admin";
 import {
   Card,
   CardContent,
@@ -38,7 +39,7 @@ export default async function EditAgentPage({
     redirect("/agents");
   }
 
-  const serverName = process.env.MATRIX_SERVER_NAME ?? "matrix.example.com";
+  const serverName = getServerName();
   const ollamaEnabled = isOllamaConfigured();
   const ollamaModels = ollamaEnabled ? await listOllamaModels() : [];
 
