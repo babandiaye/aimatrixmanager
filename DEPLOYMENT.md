@@ -72,7 +72,7 @@ externes sont prêtes ; 4-6h sinon.
 
 ### Côté machine cible
 - **Ubuntu 22.04 LTS ou +**, accès root (`sudo`)
-- **Domaine public** pointé vers le serveur (ex. `preprod-aibotmanager.unchk.sn`)
+- **Domaine public** pointé vers le serveur (ex. `aibotmanager.unchk.sn`)
 - **Certificat TLS** valide pour ce domaine
 - **Ports ouverts** : 80, 443 (entrant) + sortants vers Keycloak, Moodle, Ollama, Anthropic
 
@@ -290,8 +290,8 @@ Dans la console Keycloak, sur le realm cible (ex. `UNCHK`) :
 | Client authentication | `ON` |
 | Standard flow | ✅ |
 | Direct access grants | ❌ (pas utilisé) |
-| Valid redirect URIs | `https://preprod-aibotmanager.unchk.sn/api/auth/callback/keycloak` |
-| Web origins | `https://preprod-aibotmanager.unchk.sn` |
+| Valid redirect URIs | `https://aibotmanager.unchk.sn/api/auth/callback/keycloak` |
+| Web origins | `https://aibotmanager.unchk.sn` |
 
 Onglet **Credentials** → noter le **Client secret** (à reporter dans
 `KEYCLOAK_CLIENT_SECRET`).
@@ -457,7 +457,7 @@ DATABASE_URL="postgresql://aimatrix_user:<DB_PASS>@127.0.0.1:5432/aimatrixmanage
 # ─── NextAuth ────────────────────────────────────────────────────
 AUTH_SECRET="<openssl rand -base64 32>"
 AUTH_TRUST_HOST="true"
-NEXTAUTH_URL="https://preprod-aibotmanager.unchk.sn"
+NEXTAUTH_URL="https://aibotmanager.unchk.sn"
 
 # ─── Keycloak (provider unique) ──────────────────────────────────
 KEYCLOAK_ISSUER="https://senid.unchk.sn/realms/UNCHK"
@@ -589,13 +589,13 @@ Créer `/etc/nginx/sites-available/aibotmanager.conf` :
 ```nginx
 server {
     listen 80;
-    server_name preprod-aibotmanager.unchk.sn;
+    server_name aibotmanager.unchk.sn;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl http2;
-    server_name preprod-aibotmanager.unchk.sn;
+    server_name aibotmanager.unchk.sn;
 
     ssl_certificate     /etc/nginx/ssl/unchk.sn_cert.pem;
     ssl_certificate_key /etc/nginx/ssl/star_unchk.sn.key;
@@ -698,7 +698,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ```bash
 # App publique
-curl -sI https://preprod-aibotmanager.unchk.sn/help | head -3
+curl -sI https://aibotmanager.unchk.sn/help | head -3
 # → HTTP/1.1 200 OK
 
 # Synapse client (publique)
@@ -781,7 +781,7 @@ bot tourne en attendant.
 
 ## Étape 11 — Premier login (bootstrap ADMIN)
 
-Ouvre `https://preprod-aibotmanager.unchk.sn/login` dans un navigateur.
+Ouvre `https://aibotmanager.unchk.sn/login` dans un navigateur.
 
 1. La page redirige immédiatement vers Keycloak (307 → SSO).
 2. Authentifie-toi avec un compte UN-CHK ayant `affiliation=Personnel`.

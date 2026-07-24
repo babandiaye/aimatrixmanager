@@ -69,7 +69,7 @@ REJOIN_MAX_FAILS = int(os.getenv("REJOIN_MAX_FAILS", "3"))
 WELCOME_GRACE_SEC = int(os.getenv("WELCOME_GRACE_SEC", "300"))       # 5 min
 WELCOME_SYNC_DELAY_SEC = int(os.getenv("WELCOME_SYNC_DELAY_SEC", "5"))
 PUBLIC_APP_URL = os.getenv(
-    "PUBLIC_APP_URL", "https://preprod-aibotmanager.unchk.sn"
+    "PUBLIC_APP_URL", "https://aibotmanager.unchk.sn"
 ).rstrip("/")
 
 logging.basicConfig(
