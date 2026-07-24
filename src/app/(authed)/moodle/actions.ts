@@ -8,8 +8,10 @@ import { prisma } from "@/lib/prisma";
 import { assertCan } from "@/lib/permissions";
 import { encrypt } from "@/lib/crypto";
 import {
+  getSiteInfo,
   listCourses,
   listMatrixActivities,
+  MoodleWSError,
 } from "@/lib/moodle-ws";
 import { syncCourseContentsCore } from "@/lib/moodle-course-sync";
 import { extractCourseContents } from "@/lib/rag-indexer";
@@ -133,6 +135,253 @@ export async function updatePlatform(
   revalidatePath("/moodle");
   revalidatePath(`/moodle/${id}/edit`);
   redirect("/moodle");
+}
+
+// ── Test des prérequis d'une plateforme ────────────────────────────────────
+// Vérifie que la plateforme est correctement configurée pour l'intégration
+// aibotmanager. Le compte lié à `wsToken` doit avoir accès à un ensemble
+// précis de fonctions webservice (config du service Moodle « External
+// service » côté /admin/settings.php?section=externalservices).
+//
+// Chaque check est indépendant : on essaie de tous les faire même si un
+// précédent a échoué, pour donner à l'utilisateur un rapport le plus
+// complet possible en un seul aller-retour. Sauf pour la connectivité :
+// si core_webservice_get_site_info échoue, tout le reste ne peut pas
+// être testé (on n'a pas la liste des fonctions).
+
+/**
+ * Résultat d'un check individuel. `ok=true` = OK, `ok=false` = manquant,
+ * `ok="warn"` = présent mais avec réserve (ex: cours vus par le token = 0).
+ */
+export type PlatformCheck = {
+  ok: true | false | "warn";
+  label: string;
+  detail: string;
+};
+
+// Fonctions webservice réellement utilisées par le code aibotmanager.
+// À maintenir en sync avec `src/lib/moodle-ws.ts` : ajouter ici tout
+// nouveau `callMoodleWS(..., "fonction_ws", ...)`. Cette liste sert de
+// contrat d'intégration côté Moodle admin (elles doivent toutes être
+// cochées dans le service externe rattaché au token).
+const REQUIRED_WS_FUNCTIONS: Array<{
+  name: string;
+  usedBy: string;
+}> = [
+  {
+    name: "core_webservice_get_site_info",
+    usedBy: "connectivité + test lui-même",
+  },
+  { name: "core_course_get_courses", usedBy: "sync des cours" },
+  { name: "core_course_get_courses_by_field", usedBy: "sync des cours" },
+  {
+    name: "core_course_get_contents",
+    usedBy: "RAG multi-fichiers (livres, ressources)",
+  },
+  {
+    name: "core_user_get_users_by_field",
+    usedBy: "résolution enseignant par email",
+  },
+  {
+    name: "core_enrol_get_users_courses",
+    usedBy: "liste des cours d'un utilisateur",
+  },
+  {
+    name: "core_enrol_get_enrolled_users",
+    usedBy: "rôles utilisateur (Enseignant/Tuteur) sur un cours",
+  },
+  {
+    name: "mod_matrix_get_matrices_by_courses",
+    usedBy: "activités mod_matrix + auto-link salons",
+  },
+];
+
+export async function testMoodlePlatform(platformId: string): Promise<{
+  platformName: string;
+  baseUrl: string;
+  checks: PlatformCheck[];
+  okCount: number;
+  warnCount: number;
+  errorCount: number;
+}> {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "moodle.view");
+
+  const platform = await prisma.moodlePlatform.findUniqueOrThrow({
+    where: { id: platformId },
+  });
+
+  const checks: PlatformCheck[] = [];
+
+  // 1. Connectivité + auth token — appel core_webservice_get_site_info.
+  const t0 = Date.now();
+  let siteInfo: Awaited<ReturnType<typeof getSiteInfo>> | null = null;
+  try {
+    siteInfo = await getSiteInfo(platform);
+    const ms = Date.now() - t0;
+    checks.push({
+      ok: true,
+      label: "Connectivité + token",
+      detail: `réponse OK en ${ms} ms`,
+    });
+    checks.push({
+      ok: true,
+      label: "Compte service (userinfo)",
+      detail: `${siteInfo.username} (userid=${siteInfo.userid}) — ${siteInfo.sitename}`,
+    });
+    checks.push({
+      ok: true,
+      label: "Version Moodle",
+      detail: siteInfo.release || siteInfo.version || "inconnue",
+    });
+  } catch (e) {
+    const msg =
+      e instanceof MoodleWSError
+        ? `[${e.errcode}] ${e.message}`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    checks.push({
+      ok: false,
+      label: "Connectivité + token",
+      detail: msg,
+    });
+    // Sans site_info, on ne peut pas tester le reste.
+    return summarize(platform.name, platform.baseUrl, checks);
+  }
+
+  // 2. Vérification que TOUTES les fonctions requises sont exposées à ce token.
+  const exposedNames = new Set(siteInfo.functions.map((f) => f.name));
+  const missingFns = REQUIRED_WS_FUNCTIONS.filter(
+    (f) => !exposedNames.has(f.name),
+  );
+  if (missingFns.length === 0) {
+    checks.push({
+      ok: true,
+      label: `Fonctions webservice (${REQUIRED_WS_FUNCTIONS.length}/${REQUIRED_WS_FUNCTIONS.length})`,
+      detail: "toutes les fonctions requises sont exposées au token",
+    });
+  } else {
+    // core_course_get_courses ET core_course_get_courses_by_field :
+    // on utilise l'un OU l'autre selon le call. Si UN des deux est présent
+    // c'est OK — on downgrade en warn au lieu d'error.
+    const onlyCoursesAlias =
+      missingFns.length === 1 &&
+      (missingFns[0].name === "core_course_get_courses" ||
+        missingFns[0].name === "core_course_get_courses_by_field") &&
+      exposedNames.has(
+        missingFns[0].name === "core_course_get_courses"
+          ? "core_course_get_courses_by_field"
+          : "core_course_get_courses",
+      );
+    checks.push({
+      ok: onlyCoursesAlias ? "warn" : false,
+      label: `Fonctions webservice (${REQUIRED_WS_FUNCTIONS.length - missingFns.length}/${REQUIRED_WS_FUNCTIONS.length})`,
+      detail:
+        `Manquante(s) : ` +
+        missingFns.map((f) => `${f.name} (${f.usedBy})`).join(", "),
+    });
+  }
+
+  // 3. Zoom mod_matrix : présent + version pour aider au debug.
+  const matrixFn = siteInfo.functions.find(
+    (f) => f.name === "mod_matrix_get_matrices_by_courses",
+  );
+  if (matrixFn) {
+    checks.push({
+      ok: true,
+      label: "Plugin mod_matrix",
+      detail: `${matrixFn.name} v${matrixFn.version}`,
+    });
+  } else {
+    checks.push({
+      ok: false,
+      label: "Plugin mod_matrix",
+      detail:
+        "Le plugin Famedly/mod_matrix n'est pas installé (ou pas exposé au token). Sans lui, aucune activité Matrix ne peut être importée.",
+    });
+  }
+
+  // 4. Cours accessibles par le token : appel léger pour valider que le token
+  //    a les droits sur core_course_get_courses. Signale si 0 → problème de
+  //    capacité côté le rôle Moodle du compte service.
+  try {
+    const courses = await listCourses(platform);
+    if (courses.length === 0) {
+      checks.push({
+        ok: "warn",
+        label: "Cours visibles par le token",
+        detail:
+          "0 cours retourné — le compte service n'a peut-être pas la capability moodle/course:view ou l'instance n'a aucun cours.",
+      });
+    } else {
+      checks.push({
+        ok: true,
+        label: "Cours visibles par le token",
+        detail: `${courses.length} cours accessibles`,
+      });
+    }
+  } catch (e) {
+    const msg =
+      e instanceof MoodleWSError
+        ? `[${e.errcode}] ${e.message}`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    checks.push({
+      ok: false,
+      label: "Cours visibles par le token",
+      detail: msg,
+    });
+  }
+
+  // 5. Test réel de listMatrixActivities si mod_matrix est là — validation
+  //    end-to-end (utile car certaines instances exposent la fonction mais
+  //    le token n'a pas moodle/course:view sur les cours cibles → retour
+  //    silencieusement vide).
+  if (matrixFn) {
+    try {
+      const acts = await listMatrixActivities(platform);
+      checks.push({
+        ok: acts.length === 0 ? "warn" : true,
+        label: "mod_matrix_get_matrices_by_courses (appel réel)",
+        detail:
+          acts.length === 0
+            ? "appel OK mais 0 activité — normal si aucun cours n'utilise mod_matrix (rappel : Moodle renvoie [] sans filtre courseids)"
+            : `${acts.length} activité(s) retournée(s)`,
+      });
+    } catch (e) {
+      const msg =
+        e instanceof MoodleWSError
+          ? `[${e.errcode}] ${e.message}`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      checks.push({
+        ok: false,
+        label: "mod_matrix_get_matrices_by_courses (appel réel)",
+        detail: msg,
+      });
+    }
+  }
+
+  return summarize(platform.name, platform.baseUrl, checks);
+}
+
+function summarize(
+  platformName: string,
+  baseUrl: string,
+  checks: PlatformCheck[],
+) {
+  return {
+    platformName,
+    baseUrl,
+    checks,
+    okCount: checks.filter((c) => c.ok === true).length,
+    warnCount: checks.filter((c) => c.ok === "warn").length,
+    errorCount: checks.filter((c) => c.ok === false).length,
+  };
 }
 
 export async function togglePlatformEnabled(id: string, enabled: boolean) {

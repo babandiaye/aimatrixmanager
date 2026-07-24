@@ -37,6 +37,40 @@ export async function callMoodleWS<T = unknown>(
   return json as T;
 }
 
+// ── Info du site + fonctions exposées ──────────────────────────────────────
+// core_webservice_get_site_info retourne le nom du site, le user derrière
+// le token, et la liste des fonctions webservice autorisées à ce token
+// (dépend du service Moodle auquel le token est rattaché). C'est LA source
+// de vérité pour vérifier les prérequis d'intégration : plugin mod_matrix
+// installé ? core_user_get_users_by_field autorisé ? etc.
+
+export type MoodleFunctionDTO = {
+  name: string;
+  version: string;
+};
+
+export type MoodleSiteInfoDTO = {
+  sitename: string;
+  siteurl: string;
+  username: string;
+  firstname: string;
+  lastname: string;
+  fullname: string;
+  userid: number;
+  release: string; // ex: "4.5.7+ (Build: 20251009)"
+  version: string;
+  functions: MoodleFunctionDTO[];
+};
+
+export async function getSiteInfo(
+  platform: Pick<MoodlePlatform, "baseUrl" | "wsToken">,
+): Promise<MoodleSiteInfoDTO> {
+  return callMoodleWS<MoodleSiteInfoDTO>(
+    platform,
+    "core_webservice_get_site_info",
+  );
+}
+
 export type MoodleCourseDTO = {
   id: number;
   shortname: string;

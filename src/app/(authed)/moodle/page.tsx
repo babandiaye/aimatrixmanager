@@ -22,6 +22,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { PlusIcon } from "@heroicons/react/24/outline";
 import { PlatformActions } from "./platform-actions";
+import { TestPlatformButton } from "./test-platform-button";
 
 export default async function MoodlePlatformsPage() {
   const session = await auth();
@@ -139,12 +140,15 @@ export default async function MoodlePlatformsPage() {
                       </StatusBadge>
                     </TableCell>
                     <TableCell className="text-right">
-                      <PlatformActions
-                        id={p.id}
-                        enabled={p.enabled}
-                        canUpdate={canUpdate}
-                        canDelete={canDelete}
-                      />
+                      <div className="inline-flex items-center gap-2">
+                        <TestPlatformButton platformId={p.id} />
+                        <PlatformActions
+                          id={p.id}
+                          enabled={p.enabled}
+                          canUpdate={canUpdate}
+                          canDelete={canDelete}
+                        />
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
