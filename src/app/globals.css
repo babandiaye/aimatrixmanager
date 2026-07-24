@@ -60,7 +60,10 @@
 
 /* ─── Palette UNCHK (light) ───────────────────────────────────────────── */
 :root {
-  --background: #f8fafc;
+  /* Fond légèrement bleuté sur les pages authed pour dégager du blanc pur
+     des cards — donne le look "dashboard" cohérent avec la charte visuelle
+     AI Bot Manager (ex-#f8fafc slate). */
+  --background: #f5f8fe;
   --foreground: #0f172a;
   --card: #ffffff;
   --card-foreground: #0f172a;
