@@ -18,6 +18,7 @@ import {
   ChatBubbleLeftRightIcon,
   CpuChipIcon,
 } from "@heroicons/react/24/outline";
+import { RefreshMyCoursesButton } from "./refresh-button";
 
 export default async function MesCoursPage() {
   const session = await auth();
@@ -27,43 +28,64 @@ export default async function MesCoursPage() {
     redirect("/");
   }
 
-  // Pour ENSEIGNANT : résoudre ses cours Moodle (1er accès = appels WS, ensuite cache 1h)
-  // Pour ADMIN/MANAGER : tous les cours qui ont au moins un salon Matrix lié.
-  // (Sinon on noierait l'admin dans 100+ cours synchronisés sans intérêt opérationnel.)
-  const teacherCourseIds =
-    session.user.role === "ENSEIGNANT"
-      ? await resolveTeacherCourseIds(session.user.id)
-      : null;
+  // Résout le scope Moodle "cours où je suis enseignant/tuteur" pour tous
+  // les rôles aibotmanager (ADMIN inclus — un admin technique peut être
+  // enseignant côté Moodle et vouloir gérer ses agents pour ses propres
+  // cours). Cache 1h dans User.moodleUserMap. Pour vider ce cache :
+  // bouton "Rafraîchir depuis Moodle" en haut de la page.
+  const teacherCourseIds = await resolveTeacherCourseIds(session.user.id);
 
-  const courses = await prisma.moodleCourse.findMany({
-    where:
-      teacherCourseIds !== null
-        ? { id: { in: teacherCourseIds } }
-        : { rooms: { some: { source: "MOODLE" } } },
-    include: {
-      platform: { select: { key: true, name: true, baseUrl: true } },
-      rooms: {
-        include: {
-          assignments: {
-            where: { enabled: true },
-            select: { agent: { select: { slug: true } } },
-          },
-        },
-      },
-      _count: { select: { rooms: true, resources: true } },
-    },
-    orderBy: [{ platformId: "asc" }, { fullname: "asc" }],
+  // Timestamp de la dernière sync — affiché en petit dans le header pour
+  // que l'user sache si sa vue est fraîche ou pas.
+  const me = await prisma.user.findUnique({
+    where: { id: session.user.id },
+    select: { lastMoodleSyncAt: true },
   });
+  const lastSync = me?.lastMoodleSyncAt;
+
+  const courses =
+    teacherCourseIds.length > 0
+      ? await prisma.moodleCourse.findMany({
+          where: { id: { in: teacherCourseIds } },
+          include: {
+            platform: { select: { key: true, name: true, baseUrl: true } },
+            rooms: {
+              include: {
+                assignments: {
+                  where: { enabled: true },
+                  select: { agent: { select: { slug: true } } },
+                },
+              },
+            },
+            _count: { select: { rooms: true, resources: true } },
+          },
+          orderBy: [{ platformId: "asc" }, { fullname: "asc" }],
+        })
+      : [];
+
+  // Sépare les cours qui ont au moins un salon Matrix lié (source=MOODLE)
+  // de ceux qui n'en ont pas — présentation en deux blocs distincts pour
+  // que l'enseignant repère immédiatement où l'IA est déjà exploitable.
+  const coursesWithRoom = courses.filter((c) => c._count.rooms > 0);
+  const coursesWithoutRoom = courses.filter((c) => c._count.rooms === 0);
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">Mes cours</h1>
-        <p className="text-muted-foreground">
-          {session.user.role === "ENSEIGNANT"
-            ? "Les cours Moodle où tu es enseignant. Tu peux y affecter tes agents IA."
-            : "Cours Moodle ayant une activité Matrix liée."}
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-foreground">Mes cours</h1>
+          <p className="text-muted-foreground">
+            Les cours Moodle où tu es enseignant, tuteur ou tuteur suivi. Tu
+            peux affecter tes agents IA aux salons Matrix liés.
+          </p>
+          {lastSync && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Dernière synchronisation Moodle :{" "}
+              {lastSync.toLocaleString("fr-FR")}
+            </p>
+          )}
+        </div>
+        <RefreshMyCoursesButton />
       </div>
 
       {courses.length === 0 ? (
@@ -71,42 +93,98 @@ export default async function MesCoursPage() {
           <CardHeader>
             <CardTitle>Aucun cours trouvé</CardTitle>
             <CardDescription>
-              {session.user.role === "ENSEIGNANT" ? (
-                <>
-                  Nous n&apos;avons trouvé aucun cours où tu es marqué comme
-                  enseignant côté Moodle pour l&apos;email{" "}
-                  <code>{session.user.email}</code>. Vérifications :
-                  <ul className="mt-2 ml-4 list-disc text-xs">
-                    <li>
-                      Ton compte Keycloak utilise le même email que ton compte
-                      Moodle ?
-                    </li>
-                    <li>
-                      Tu as bien le rôle « Enseignant » (editingteacher) ou
-                      « Enseignant non éditeur » (teacher) dans au moins un
-                      cours Moodle ?
-                    </li>
-                    <li>
-                      La plateforme Moodle est activée côté admin (
-                      <code>/moodle</code>) ?
-                    </li>
-                  </ul>
-                </>
-              ) : (
-                <>
-                  Aucun cours n&apos;a encore d&apos;activité Matrix liée. Va
-                  dans <code>/moodle</code> → ouvre une plateforme → onglet
-                  Activités Matrix → bouton <strong>Synchroniser</strong> pour
-                  importer les <code>mod_matrix</code> et lier les salons aux
-                  cours.
-                </>
-              )}
+              Nous n&apos;avons trouvé aucun cours où tu es marqué comme
+              enseignant, tuteur ou tuteur suivi côté Moodle pour l&apos;email{" "}
+              <code>{session.user.email}</code>. Vérifications :
+              <ul className="mt-2 ml-4 list-disc text-xs">
+                <li>
+                  Ton compte Keycloak utilise le même email que ton compte
+                  Moodle ?
+                </li>
+                <li>
+                  Tu as bien un rôle enseignant (editingteacher, teacher,
+                  tuteur ou tuteur suivi) dans au moins un cours Moodle ?
+                </li>
+                <li>
+                  La plateforme Moodle est activée côté admin (
+                  <code>/moodle</code>) ?
+                </li>
+                <li>
+                  Le cache a été rafraîchi récemment (clique sur{" "}
+                  <strong>Rafraîchir depuis Moodle</strong> en haut à droite) ?
+                </li>
+              </ul>
             </CardDescription>
           </CardHeader>
         </Card>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {courses.map((c) => {
+        <>
+          {coursesWithRoom.length > 0 && (
+            <section className="space-y-3">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">
+                  Cours avec activité Matrix ({coursesWithRoom.length})
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Ces cours ont au moins un salon Matrix lié — tu peux y
+                  affecter un agent IA depuis <code>/rooms</code>.
+                </p>
+              </div>
+              <CourseGrid courses={coursesWithRoom} />
+            </section>
+          )}
+          {coursesWithoutRoom.length > 0 && (
+            <section className="space-y-3">
+              <div>
+                <h2 className="text-lg font-semibold text-muted-foreground">
+                  Cours sans activité Matrix ({coursesWithoutRoom.length})
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Aucun salon Matrix n&apos;est encore lié. Un enseignant peut
+                  créer une activité <code>mod_matrix</code> côté Moodle, puis
+                  cliquer sur <strong>Rafraîchir depuis Moodle</strong>.
+                </p>
+              </div>
+              <CourseGrid courses={coursesWithoutRoom} dimmed />
+            </section>
+          )}
+        </>
+      )}
+
+    </div>
+  );
+}
+
+/**
+ * Grille responsive de cards de cours. `dimmed` opacifie légèrement le bloc
+ * pour signaler visuellement que ces cours n'ont pas encore d'activité Matrix
+ * — l'utilisateur les voit mais comprend qu'ils ne sont pas "actionnables"
+ * côté aibotmanager.
+ */
+function CourseGrid({
+  courses,
+  dimmed = false,
+}: {
+  courses: Array<{
+    id: string;
+    fullname: string;
+    shortname: string;
+    moodleId: number;
+    platform: { key: string; name: string; baseUrl: string };
+    rooms: Array<{
+      id: string;
+      name: string | null;
+      assignments: Array<{ agent: { slug: string } }>;
+    }>;
+    _count: { rooms: number; resources: number };
+  }>;
+  dimmed?: boolean;
+}) {
+  return (
+    <div
+      className={`grid gap-4 md:grid-cols-2 ${dimmed ? "opacity-70" : ""}`}
+    >
+      {courses.map((c) => {
             const allAgents = new Set<string>();
             for (const r of c.rooms) {
               for (const a of r.assignments) allAgents.add(a.agent.slug);
@@ -212,8 +290,6 @@ export default async function MesCoursPage() {
               </Card>
             );
           })}
-        </div>
-      )}
     </div>
   );
 }

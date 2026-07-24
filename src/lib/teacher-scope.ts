@@ -25,10 +25,32 @@ const log = logger.child({ mod: "teacher-scope" });
 // l'enrôlement Moodle change peu, et un re-resolve est rapide (~2 WS calls).
 const RESOLVE_TTL_MS = 60 * 60 * 1000;
 
-// Rôles Moodle considérés comme "enseignant". editingteacher est le rôle
-// principal ; on accepte aussi teacher (non-editing) au cas où. Pas "manager"
-// car le manager Moodle est un admin, hors scope pédagogique.
-const TEACHER_ROLE_SHORTNAMES = new Set(["editingteacher", "teacher"]);
+// Rôles Moodle considérés comme "enseignant/tuteur" pour le scope /mes-cours.
+//
+//  - editingteacher / teacher : rôles standards Moodle.
+//  - tuteur, tuteur_suivi, tuteurs_suivi, tuteur-suivi : rôles UN-CHK
+//    (variations d'écriture selon les Moodle). Une des shortnames de ces
+//    variantes existe côté chaque plateforme.
+//  - Pas "manager" car le manager Moodle est un admin technique, hors scope
+//    pédagogique.
+//
+// L'env `MOODLE_TEACHER_ROLES` (CSV) permet d'étendre la liste sans toucher
+// au code, utile si UN-CHK ajoute plus tard des rôles custom (ex. « assistant
+// pédagogique »).
+const TEACHER_ROLE_SHORTNAMES = new Set(
+  [
+    "editingteacher",
+    "teacher",
+    "tuteur",
+    "tuteur_suivi",
+    "tuteurs_suivi",
+    "tuteur-suivi",
+    ...(process.env.MOODLE_TEACHER_ROLES ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  ],
+);
 
 /**
  * Résout l'ensemble des MoodleCourse.id (CUIDs de notre DB) où l'utilisateur
