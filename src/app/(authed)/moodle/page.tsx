@@ -23,6 +23,8 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { PlusIcon } from "@heroicons/react/24/outline";
 import { PlatformActions } from "./platform-actions";
 import { TestPlatformButton } from "./test-platform-button";
+import { PageHeader } from "@/components/ui/page-header";
+import { AcademicCapIcon } from "@heroicons/react/24/outline";
 
 export default async function MoodlePlatformsPage() {
   const session = await auth();
@@ -45,22 +47,19 @@ export default async function MoodlePlatformsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">
-            Plateformes Moodle
-          </h1>
-          <p className="text-muted-foreground">
-            Instances Moodle reliées à AI Bot Manager (DISI, P11STN…).
-          </p>
-        </div>
-        {canCreate && (
-          <Link href="/moodle/new" className={buttonVariants({ size: "lg" })}>
-            <PlusIcon className="size-4" />
-            Ajouter une plateforme
-          </Link>
-        )}
-      </div>
+      <PageHeader
+        icon={AcademicCapIcon}
+        title="Plateformes Moodle"
+        description="Instances Moodle reliées à AI Bot Manager (DISI, P11STN…)."
+        actions={
+          canCreate && (
+            <Link href="/moodle/new" className={buttonVariants({ size: "lg" })}>
+              <PlusIcon className="size-4" />
+              Ajouter une plateforme
+            </Link>
+          )
+        }
+      />
 
       {platforms.length === 0 ? (
         <Card>

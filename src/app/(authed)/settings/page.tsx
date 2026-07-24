@@ -10,6 +10,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { PageHeader } from "@/components/ui/page-header";
+import { Cog6ToothIcon } from "@heroicons/react/24/outline";
 
 export default async function SettingsPage() {
   const session = await auth();
@@ -20,12 +22,11 @@ export default async function SettingsPage() {
 
   return (
     <div className="max-w-3xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">Paramètres</h1>
-        <p className="text-muted-foreground">
-          Configuration générale d&apos;AI Bot Manager.
-        </p>
-      </div>
+      <PageHeader
+        icon={Cog6ToothIcon}
+        title="Paramètres"
+        description="Configuration générale d'AI Bot Manager."
+      />
 
       <Card>
         <CardHeader>

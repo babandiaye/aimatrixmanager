@@ -23,12 +23,14 @@ import { buttonVariants } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Pagination } from "@/components/ui/pagination";
 import {
+  CpuChipIcon,
   PlusIcon,
   ShieldCheckIcon,
   ShieldExclamationIcon,
   ExclamationTriangleIcon,
 } from "@heroicons/react/24/outline";
 import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
+import { PageHeader } from "@/components/ui/page-header";
 import { AgentRowActions } from "./row-actions";
 
 const PAGE_SIZE = 10;
@@ -74,23 +76,19 @@ export default async function AgentsPage({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">
-            Agents IA
-          </h1>
-          <p className="text-muted-foreground">
-            Bots Matrix pilotés par Claude. Chaque agent a un compte Matrix
-            et un prompt système propres.
-          </p>
-        </div>
-        {canCreate && (
-          <Link href="/agents/new" className={buttonVariants({ size: "lg" })}>
-            <PlusIcon className="size-4" />
-            Nouvel agent
-          </Link>
-        )}
-      </div>
+      <PageHeader
+        icon={CpuChipIcon}
+        title="Agents IA"
+        description="Bots Matrix pilotés par Claude. Chaque agent a un compte Matrix et un prompt système propres."
+        actions={
+          canCreate && (
+            <Link href="/agents/new" className={buttonVariants({ size: "lg" })}>
+              <PlusIcon className="size-4" />
+              Nouvel agent
+            </Link>
+          )
+        }
+      />
 
       {total === 0 ? (
         <Card>

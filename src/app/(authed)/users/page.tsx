@@ -20,6 +20,8 @@ import {
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Pagination } from "@/components/ui/pagination";
 import { UserActions } from "./user-actions";
+import { PageHeader } from "@/components/ui/page-header";
+import { UserGroupIcon } from "@heroicons/react/24/outline";
 
 const PAGE_SIZE = 20;
 
@@ -50,14 +52,11 @@ export default async function UsersPage({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">
-          Utilisateurs
-        </h1>
-        <p className="text-muted-foreground">
-          Comptes ayant accès à AI Bot Manager.
-        </p>
-      </div>
+      <PageHeader
+        icon={UserGroupIcon}
+        title="Utilisateurs"
+        description="Comptes ayant accès à AI Bot Manager."
+      />
 
       <Card>
         <CardHeader>

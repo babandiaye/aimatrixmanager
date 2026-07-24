@@ -15,11 +15,15 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { PageHeader } from "@/components/ui/page-header";
+import { KpiCard } from "@/components/ui/kpi-card";
+import { SectionHeader } from "@/components/ui/section-header";
 import {
   CpuChipIcon,
   ChatBubbleLeftRightIcon,
   AcademicCapIcon,
   BookOpenIcon,
+  ChartBarIcon,
   ExclamationTriangleIcon,
   CheckCircleIcon,
   XCircleIcon,
@@ -93,65 +97,67 @@ export default async function DashboardPage() {
   });
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">
-          Tableau de bord
-        </h1>
-        <p className="text-muted-foreground">
-          Bonjour {session.user.name?.split(" ")[0] ?? "—"}, voici l&apos;état
-          de tes agents IA.
-        </p>
-      </div>
+    <div className="space-y-8">
+      <PageHeader
+        icon={ChartBarIcon}
+        title="Tableau de bord"
+        description={`Bonjour ${session.user.name?.split(" ")[0] ?? "—"}, voici l'état de tes agents IA.`}
+      />
 
-      {/* KPIs */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <KpiCard
-          icon={CpuChipIcon}
-          label="Agents"
-          primary={`${agentEnabled} / ${agentTotal}`}
-          sub="actifs / total"
-          href="/agents"
-        />
-        <KpiCard
-          icon={ChatBubbleLeftRightIcon}
-          label="Affectations actives"
-          primary={String(assignmentActive)}
-          sub={`sur ${roomTotal} salon(s) connus`}
-          href="/rooms"
-        />
-        <KpiCard
-          icon={AcademicCapIcon}
-          label="Plateformes Moodle"
-          primary={String(platformActive)}
-          sub="instances actives"
-          href="/moodle"
-        />
-        <KpiCard
-          icon={BookOpenIcon}
-          label="Cours synchronisés"
-          primary={String(courseTotal)}
-          sub="référencés en DB"
-          href="/moodle"
-        />
+      {/* KPIs — cards cliquables (wrapper Link autour) */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Link href="/agents" className="block">
+          <KpiCard
+            icon={CpuChipIcon}
+            value={`${agentEnabled}/${agentTotal}`}
+            label="Agents actifs / total"
+          />
+        </Link>
+        <Link href="/rooms" className="block">
+          <KpiCard
+            icon={ChatBubbleLeftRightIcon}
+            value={assignmentActive}
+            label={`Affectations sur ${roomTotal} salons`}
+          />
+        </Link>
+        <Link href="/moodle" className="block">
+          <KpiCard
+            icon={AcademicCapIcon}
+            value={platformActive}
+            label="Plateformes Moodle actives"
+          />
+        </Link>
+        <Link href="/moodle" className="block">
+          <KpiCard
+            icon={BookOpenIcon}
+            value={courseTotal}
+            label="Cours synchronisés"
+            accent
+          />
+        </Link>
       </div>
 
       {/* Cours avec activité Matrix */}
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            Cours Moodle avec activité Matrix
-            {matrixCoursesTotal > 0 && (
-              <span className="ml-2 text-sm font-normal text-muted-foreground">
-                ({matrixCoursesTotal})
-              </span>
-            )}
-          </CardTitle>
-          <CardDescription>
-            Cours dont au moins un salon Matrix est rattaché via le plugin{" "}
-            <code>mod_matrix</code>.
-          </CardDescription>
-        </CardHeader>
+      <section className="space-y-3">
+        <SectionHeader
+          title={
+            <>
+              Cours Moodle avec activité Matrix
+              {matrixCoursesTotal > 0 && (
+                <span className="ml-2 text-sm font-normal text-muted-foreground">
+                  ({matrixCoursesTotal})
+                </span>
+              )}
+            </>
+          }
+          description={
+            <>
+              Cours dont au moins un salon Matrix est rattaché via le plugin{" "}
+              <code>mod_matrix</code>.
+            </>
+          }
+        />
+        <Card>
         <CardContent>
           {matrixCourses.length === 0 ? (
             <p className="text-sm text-muted-foreground">
@@ -245,25 +251,25 @@ export default async function DashboardPage() {
             </ul>
           )}
         </CardContent>
-      </Card>
+        </Card>
+      </section>
 
       {/* État des services */}
-      <Card>
-        <CardHeader>
-          <CardTitle>État des services</CardTitle>
-          <CardDescription>
-            Vérification temps-réel — seuils : DB &lt;100 ms, agents en ligne
-            si heartbeat &lt;90 s.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="space-y-2">
-            {health.map((h) => (
-              <HealthRow key={h.key} item={h} />
-            ))}
-          </ul>
-        </CardContent>
-      </Card>
+      <section className="space-y-3">
+        <SectionHeader
+          title="État des services"
+          description="Vérification temps-réel — seuils : DB <100 ms, agents en ligne si heartbeat <90 s."
+        />
+        <Card>
+          <CardContent>
+            <ul className="space-y-2">
+              {health.map((h) => (
+                <HealthRow key={h.key} item={h} />
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      </section>
     </div>
   );
 }
@@ -313,37 +319,3 @@ function HealthRow({ item }: { item: HealthItem }) {
   );
 }
 
-function KpiCard({
-  icon: Icon,
-  label,
-  primary,
-  sub,
-  href,
-}: {
-  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>;
-  label: string;
-  primary: string;
-  sub: string;
-  href: string;
-}) {
-  return (
-    <Link href={href} className="block group">
-      <Card className="transition-colors group-hover:bg-muted/30">
-        <CardContent className="flex items-center gap-4 py-2">
-          <div className="rounded-lg bg-secondary p-3">
-            <Icon className="size-5 text-primary" />
-          </div>
-          <div className="flex-1">
-            <div className="text-xs uppercase tracking-wider text-muted-foreground">
-              {label}
-            </div>
-            <div className="text-2xl font-semibold text-foreground">
-              {primary}
-            </div>
-            <div className="text-xs text-muted-foreground">{sub}</div>
-          </div>
-        </CardContent>
-      </Card>
-    </Link>
-  );
-}

@@ -34,6 +34,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { Prisma } from "@prisma/client";
 import { SyncRoomsButton } from "./sync-rooms-button";
+import { PageHeader } from "@/components/ui/page-header";
 
 const PAGE_SIZE = 20;
 
@@ -97,16 +98,12 @@ export default async function RoomsPage({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Salons</h1>
-          <p className="text-muted-foreground">
-            Salons Matrix découverts depuis Synapse — assignation des agents
-            et lien aux cours Moodle.
-          </p>
-        </div>
-        {canSyncGlobal && <SyncRoomsButton />}
-      </div>
+      <PageHeader
+        icon={ChatBubbleLeftRightIcon}
+        title="Salons"
+        description="Salons Matrix découverts depuis Synapse — assignation des agents et lien aux cours Moodle."
+        actions={canSyncGlobal && <SyncRoomsButton />}
+      />
 
       {total === 0 ? (
         <Card>

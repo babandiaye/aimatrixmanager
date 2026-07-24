@@ -24,7 +24,9 @@ import {
   ExclamationTriangleIcon,
   XCircleIcon,
   CpuChipIcon,
+  SignalIcon,
 } from "@heroicons/react/24/outline";
+import { PageHeader } from "@/components/ui/page-header";
 
 /**
  * Page /status — état détaillé des services externes.
@@ -69,14 +71,11 @@ export default async function StatusPage() {
 
   return (
     <div className="max-w-5xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">
-          État des services
-        </h1>
-        <p className="text-muted-foreground">
-          Snapshot temps réel des composants dont dépend AI Bot Manager.
-        </p>
-      </div>
+      <PageHeader
+        icon={SignalIcon}
+        title="État des services"
+        description="Snapshot temps réel des composants dont dépend AI Bot Manager."
+      />
 
       <Card>
         <CardHeader>
