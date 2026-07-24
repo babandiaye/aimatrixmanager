@@ -38,6 +38,7 @@ import llm
 import rag
 import rag_tools
 from crypto_utils import decrypt
+from matrix_format import latex_to_mx
 
 load_dotenv()
 
@@ -284,13 +285,26 @@ class AgentRunner:
             except Exception as e:
                 self.log.warning(f"share_group_session: {e}")
 
-    async def send(self, room_id: str, text: str) -> Optional[str]:
+    async def send(
+        self,
+        room_id: str,
+        text: str,
+        formatted_body: Optional[str] = None,
+    ) -> Optional[str]:
+        """Envoie un message texte. `formatted_body` (HTML) est optionnel :
+        s'il est fourni, on ajoute `format`+`formatted_body` pour que les
+        clients riches (Element web/mobile) rendent le markdown et le
+        LaTeX (`data-mx-maths`) au lieu du texte brut."""
         try:
             await self._ensure_megolm(room_id)
+            content: dict = {"msgtype": "m.text", "body": text}
+            if formatted_body:
+                content["format"] = "org.matrix.custom.html"
+                content["formatted_body"] = formatted_body
             resp = await self.client.room_send(
                 room_id=room_id,
                 message_type="m.room.message",
-                content={"msgtype": "m.text", "body": text},
+                content=content,
                 ignore_unverified_devices=True,
             )
             return getattr(resp, "event_id", None)
@@ -298,18 +312,40 @@ class AgentRunner:
             self.log.error(f"Erreur envoi {room_id}: {e}")
             return None
 
-    async def _edit_message(self, room_id: str, event_id: str, new_text: str):
-        """Édit un message via m.replace (MSC2676)."""
+    async def _edit_message(
+        self,
+        room_id: str,
+        event_id: str,
+        new_text: str,
+        formatted_body: Optional[str] = None,
+    ):
+        """Édit un message via m.replace (MSC2676).
+
+        Pendant le streaming, `formatted_body` reste None : on ne peut
+        pas rendre du HTML/LaTeX partiel proprement (formule tronquée ⇒
+        KaTeX planterait ou clignoterait). Le pipeline appelle avec
+        `formatted_body=latex_to_mx(buffer)` uniquement sur l'édit final
+        consolidé, quand le stream est terminé.
+        """
         await self._ensure_megolm(room_id)
-        content = {
+        new_content: dict = {"msgtype": "m.text", "body": new_text}
+        content: dict = {
             "msgtype": "m.text",
             "body": f"* {new_text}",  # fallback display pour clients non-edit
-            "m.new_content": {"msgtype": "m.text", "body": new_text},
+            "m.new_content": new_content,
             "m.relates_to": {
                 "rel_type": "m.replace",
                 "event_id": event_id,
             },
         }
+        if formatted_body:
+            new_content["format"] = "org.matrix.custom.html"
+            new_content["formatted_body"] = formatted_body
+            # Le message top-level porte aussi les champs `format`/
+            # `formatted_body` pour les clients qui lisent le "fallback"
+            # (préfixé * ) en HTML.
+            content["format"] = "org.matrix.custom.html"
+            content["formatted_body"] = f"* {formatted_body}"
         try:
             await self.client.room_send(
                 room_id=room_id,
@@ -511,9 +547,14 @@ class AgentRunner:
                 pass
 
         # Édit final — toujours envoyé pour garantir le contenu complet,
-        # même si la dernière édition throttle l'avait sauté.
+        # même si la dernière édition throttle l'avait sauté. C'est aussi
+        # le seul moment où on ajoute le `formatted_body` (rendu KaTeX
+        # côté Element) : sur le buffer complet, plus de LaTeX tronqué.
         if buffer:
-            await self._edit_message(room_id, placeholder_id, buffer)
+            fb = latex_to_mx(buffer)
+            await self._edit_message(
+                room_id, placeholder_id, buffer, formatted_body=fb
+            )
 
         history.append({"role": "assistant", "content": buffer})
         # Purge mémoire
