@@ -97,12 +97,29 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 - **Synapse Matrix** déployé + access_token admin
 - **Postgres 15 + pgvector 0.8** (image `pgvector/pgvector:pg15`)
 - **Keycloak realm** avec client OIDC `aibotmanager` + **mapper `affiliation`** sur l'id_token (sinon tous les users sont rejetés)
-- **Moodle 4.x** avec service WS dédié + 6 fonctions WS (cf. [DEPLOYMENT.md §5](DEPLOYMENT.md#étape-5--moodle))
+- **Moodle 4.x** avec service WS dédié + 8 fonctions WS (cf. [DEPLOYMENT.md §5](DEPLOYMENT.md#étape-5--moodle))
 - **Plugin [`mod_matrix` (Famedly)](https://github.com/element-hq/moodle-mod_matrix)** sur chaque Moodle
 - **Ollama** compat OpenAI avec `nomic-embed-text` chargé
 - **Clé API Anthropic**
 
-### Vérifier les fonctions WS Moodle activées sur un token
+### Vérifier les prérequis d'une plateforme Moodle
+
+**Via l'UI** — bouton **Tester** (icône bécher) sur chaque ligne de `/moodle` : lance en un clic la batterie de checks côté serveur (connectivité, token, plugin `mod_matrix`, fonctions WS, appel réel de `mod_matrix_get_matrices_by_courses`) et affiche un rapport structuré avec ✅ / ⚠️ / ❌ par item.
+
+**Contrat d'intégration côté Moodle admin** — le token de la plateforme doit avoir accès à ces **8 fonctions WS** (à cocher dans *Admin site → Web services → Services externes → Fonctions*) :
+
+| Fonction | Utilisée par |
+|---|---|
+| `core_webservice_get_site_info` | Bouton Tester (connectivité + liste des fonctions) |
+| `core_course_get_courses` | Sync des cours de la plateforme |
+| `core_course_get_courses_by_field` | Sync des cours (variante) |
+| `core_course_get_contents` | Indexation RAG (livres, ressources) |
+| `core_user_get_users_by_field` | Résolution enseignant par email Keycloak |
+| `core_enrol_get_users_courses` | Liste des cours d'un enseignant |
+| `core_enrol_get_enrolled_users` | Détection des rôles enseignant/tuteur sur un cours |
+| `mod_matrix_get_matrices_by_courses` | Activités `mod_matrix` + auto-link salons ↔ cours |
+
+**En ligne de commande** (alternative CI/scripting) :
 
 ```bash
 pnpm exec tsx scripts/test-moodle-functions.ts
@@ -235,8 +252,11 @@ cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
 ```
 1. Admin promeut l'utilisateur ENSEIGNANT dans /users
 2. L'ENSEIGNANT se connecte (Keycloak — son email doit matcher son compte Moodle)
-3. /mes-cours → résolution auto via WS (cache 1h)
-   → liste les cours où il est editingteacher/teacher
+3. /mes-cours → résolution auto via WS (cache 1h, invalidable via le bouton
+   "Rafraîchir depuis Moodle") → liste des cours où il est editingteacher,
+   teacher, tuteur ou tuteur_suivi. Deux sections : cours avec activité
+   Matrix (actionnables) vs sans (grisés, incitent à créer un mod_matrix
+   côté Moodle).
 4. /agents/new → crée son propre agent IA (slug, prompt, modèle)
 5. /agents/[id]/edit → peut modifier ses propres agents (canAny "agents.update-own")
 6. /rooms → voit uniquement les salons Moodle de ses cours
@@ -244,6 +264,17 @@ cd /opt/matrix-synapse && sudo docker compose up -d --build bot-ia
 8. Le bot répond aux mentions dans le salon — pas de redémarrage requis,
    le reconcile loop prend la nouvelle assignation au tick suivant
 ```
+
+Les rôles Moodle acceptés sont extensibles sans toucher au code via l'env
+`MOODLE_TEACHER_ROLES="autre,rôle,csv"` — utile si l'instance UN-CHK ajoute
+un rôle pédagogique custom.
+
+Le bouton **Rafraîchir depuis Moodle** en tête de `/mes-cours` déclenche
+en séquence : invalidation du cache teacher-scope perso, import des
+nouveaux salons Synapse, sync des activités `mod_matrix` (avec auto-link
+Room ↔ MoodleCourse). Utile après création d'une activité côté Moodle,
+d'un ajout d'enseignant dans un cours, ou après le cron de nuit qui
+resynchronise les comptes Matrix côté Moodle.
 
 > Pour le cycle de mise à jour du code → section [Mise à jour code (cycle prod)](#mise-à-jour-code-cycle-prod) plus haut.
 
