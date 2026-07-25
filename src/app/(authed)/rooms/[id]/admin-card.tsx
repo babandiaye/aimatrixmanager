@@ -26,9 +26,16 @@ import {
   ExclamationTriangleIcon,
   ShieldCheckIcon,
   TrashIcon,
+  ArrowPathIcon,
+  LinkIcon,
 } from "@heroicons/react/24/outline";
 import { useRouter } from "next/navigation";
-import { activateRoomEncryption, deleteRoom, renameRoom } from "../actions";
+import {
+  activateRoomEncryption,
+  deleteRoom,
+  refreshRoomMoodleLink,
+  renameRoom,
+} from "../actions";
 
 export function AdminCard({
   roomId,
@@ -73,6 +80,7 @@ export function AdminCard({
           matrixRoomId={matrixRoomId}
           isEncrypted={isEncrypted}
         />
+        <RefreshMoodleLinkRow roomId={roomId} />
       </CardContent>
     </Card>
   );
@@ -351,6 +359,82 @@ function EncryptionRow({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+// ─── Actualiser le lien Moodle (ADMIN/MANAGER) ────────────────────────────
+
+function RefreshMoodleLinkRow({ roomId }: { roomId: string }) {
+  const [pending, start] = useTransition();
+  const [feedback, setFeedback] = useState<{
+    tone: "ok" | "warn" | "error";
+    message: string;
+  } | null>(null);
+  const router = useRouter();
+
+  const run = () => {
+    setFeedback(null);
+    start(async () => {
+      try {
+        const r = await refreshRoomMoodleLink(roomId);
+        setFeedback({
+          tone: r.linked ? "ok" : "warn",
+          message: r.message,
+        });
+        router.refresh();
+      } catch (e) {
+        setFeedback({
+          tone: "error",
+          message: e instanceof Error ? e.message : "Erreur",
+        });
+      }
+    });
+  };
+
+  const toneClasses = feedback
+    ? feedback.tone === "ok"
+      ? "border-status-published/30 bg-status-published/5 text-status-published"
+      : feedback.tone === "warn"
+        ? "border-status-processing/30 bg-status-processing/5 text-status-processing"
+        : "border-status-error/30 bg-status-error/5 text-status-error"
+    : "";
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-border p-3">
+        <div className="flex items-center gap-3">
+          <div className="rounded-lg bg-secondary p-2">
+            <LinkIcon className="size-5 text-primary" />
+          </div>
+          <div>
+            <div className="text-sm font-medium">Lien Moodle & RAG</div>
+            <div className="text-xs text-muted-foreground">
+              Re-détecte le cours Moodle depuis Matrix et active le RAG
+              automatiquement si des ressources indexables existent.
+            </div>
+          </div>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={run}
+          disabled={pending}
+        >
+          <ArrowPathIcon
+            className={`size-4 ${pending ? "animate-spin" : ""}`}
+          />
+          {pending ? "Actualisation..." : "Actualiser"}
+        </Button>
+      </div>
+      {feedback && (
+        <p
+          className={`rounded-md border px-3 py-2 text-xs leading-relaxed ${toneClasses}`}
+        >
+          {feedback.message}
+        </p>
+      )}
     </div>
   );
 }

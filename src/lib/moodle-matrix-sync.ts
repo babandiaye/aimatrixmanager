@@ -18,6 +18,55 @@ import { logger } from "@/lib/logger";
 
 const log = logger.child({ mod: "moodle-matrix-sync" });
 
+/**
+ * Modnames Moodle exploitables par le pipeline RAG. Aligné sur la même
+ * liste utilisée par la page /rooms/[id] (CourseLinker) pour rester
+ * cohérent entre "cours indexable" côté UI et "auto-enable" côté sync.
+ */
+const INDEXABLE_MODNAMES = ["book", "resource", "page", "folder", "label"];
+
+/**
+ * Active `reindexEnabled=true` sur un MoodleCourse si ce cours possède
+ * au moins une ressource RAG-indexable (book/PDF/page/folder/label).
+ *
+ * Idempotent : n'écrit rien si déjà `true`. Ne désactive jamais un
+ * `reindexEnabled=true` posé manuellement, même si le cours n'a plus
+ * de ressources (un ADMIN peut vouloir garder l'index vivant en
+ * attendant un ré-import Moodle).
+ *
+ * Appelée systématiquement après avoir posé un lien Room→MoodleCourse
+ * pour que le RAG soit prêt à indexer dès qu'un salon Moodle apparaît.
+ */
+export async function enableRagIfCourseIndexable(
+  courseId: string,
+): Promise<{ enabled: boolean; indexableResources: number }> {
+  const course = await prisma.moodleCourse.findUniqueOrThrow({
+    where: { id: courseId },
+    select: { id: true, reindexEnabled: true, shortname: true },
+  });
+
+  const indexable = await prisma.moodleResource.count({
+    where: {
+      section: { courseId },
+      modname: { in: INDEXABLE_MODNAMES },
+    },
+  });
+
+  if (course.reindexEnabled || indexable === 0) {
+    return { enabled: course.reindexEnabled, indexableResources: indexable };
+  }
+
+  await prisma.moodleCourse.update({
+    where: { id: courseId },
+    data: { reindexEnabled: true },
+  });
+  log.info(
+    { courseId, shortname: course.shortname, indexable },
+    "Auto-enable RAG reindex sur cours avec ressources indexables",
+  );
+  return { enabled: true, indexableResources: indexable };
+}
+
 export type SyncMatrixActivitiesResult = {
   total: number;
   inserted: number;
@@ -113,6 +162,10 @@ export async function syncMatrixActivitiesForPlatformCore(
   //     on lie, sinon on skip pour rester conservateur.
   let linkedRooms = 0;
   let linkedByName = 0;
+  // Cours effectivement liés à un salon dans cette passe → on active le
+  // RAG une fois à la fin (dédup, évite N appels si un cours porte
+  // plusieurs activités).
+  const linkedCourseIds = new Set<string>();
   for (const a of activities) {
     const moodleCourse = await prisma.moodleCourse.findUnique({
       where: {
@@ -138,6 +191,7 @@ export async function syncMatrixActivitiesForPlatformCore(
       });
       if (u.count > 0) {
         linkedRooms++;
+        linkedCourseIds.add(moodleCourse.id);
         directlyLinked = true;
       }
     }
@@ -157,6 +211,7 @@ export async function syncMatrixActivitiesForPlatformCore(
         data: { source: "MOODLE", moodleCourseId: moodleCourse.id },
       });
       linkedByName++;
+      linkedCourseIds.add(moodleCourse.id);
     } else if (candidates.length > 1) {
       log.warn(
         {
@@ -165,6 +220,20 @@ export async function syncMatrixActivitiesForPlatformCore(
           courseShortname: a.course_shortname,
         },
         "Lien fuzzy ambigu — plusieurs salons matchent, skip",
+      );
+    }
+  }
+
+  // Auto-enable RAG sur les cours nouvellement/re-liés à un salon.
+  // No-op si `reindexEnabled` déjà true ou si le cours n'a pas de
+  // ressources indexables — l'ADMIN garde la main via /rooms/[id].
+  for (const courseId of linkedCourseIds) {
+    try {
+      await enableRagIfCourseIndexable(courseId);
+    } catch (e) {
+      log.warn(
+        { err: e, courseId },
+        "Auto-enable RAG échoué pour ce cours (skip, non-bloquant)",
       );
     }
   }

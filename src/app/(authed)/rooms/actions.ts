@@ -19,6 +19,7 @@ import {
   setRoomName,
   userLeaveRoom,
 } from "@/lib/synapse-admin";
+import { enableRagIfCourseIndexable } from "@/lib/moodle-matrix-sync";
 import { z } from "zod";
 import { logger } from "@/lib/logger";
 
@@ -88,6 +89,8 @@ export async function syncRoomsFromSynapse(): Promise<{
   let inserted = 0,
     updated = 0,
     moodleLinked = 0;
+  // Cours effectivement liés à un salon → auto-enable RAG en fin de sync
+  const linkedCourseIds = new Set<string>();
 
   for (const r of synapseRooms) {
     const existing = await prisma.room.findUnique({
@@ -156,6 +159,7 @@ export async function syncRoomsFromSynapse(): Promise<{
       moodleData.source = "MOODLE";
       if (moodleCourseIdDb !== null) {
         moodleData.moodleCourseId = moodleCourseIdDb;
+        linkedCourseIds.add(moodleCourseIdDb);
       }
     }
 
@@ -174,6 +178,19 @@ export async function syncRoomsFromSynapse(): Promise<{
         },
       });
       inserted++;
+    }
+  }
+
+  // Auto-enable RAG sur les cours liés à un salon dans cette passe.
+  // Non-bloquant : un échec de lookup ne casse pas la sync entière.
+  for (const courseId of linkedCourseIds) {
+    try {
+      await enableRagIfCourseIndexable(courseId);
+    } catch (e) {
+      log.warn(
+        { err: e, courseId },
+        "Auto-enable RAG échoué pour ce cours (skip, non-bloquant)",
+      );
     }
   }
 
@@ -517,6 +534,119 @@ export async function activateRoomEncryption(roomId: string) {
   log.info({ roomId: room.matrixRoomId }, "Chiffrement E2EE activé");
   revalidatePath(`/rooms/${roomId}`);
   revalidatePath("/rooms");
+}
+
+/**
+ * Actualise le lien Moodle d'un salon spécifique — ADMIN/MANAGER.
+ *
+ * Re-lit l'état Matrix du salon (`m.room.create` pour le marker
+ * `org.matrix.moodle.course_id`), refait le lookup côté DB et met
+ * à jour `source` + `moodleCourseId` en conséquence. Auto-enable
+ * ensuite le RAG sur le cours si celui-ci a des ressources indexables.
+ *
+ * Utile quand le sync global n'a pas encore été relancé ou quand un
+ * cours vient d'être créé côté Moodle et qu'on veut lier tout de suite.
+ * Retourne un rapport pour l'affichage UI (was linked → now linked to,
+ * RAG activé ou non).
+ */
+export async function refreshRoomMoodleLink(roomId: string): Promise<{
+  linked: boolean;
+  courseId: string | null;
+  courseShortname: string | null;
+  ragAutoEnabled: boolean;
+  indexableResources: number;
+  message: string;
+}> {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertCan(session.user.role, "rooms.assign");
+
+  const room = await prisma.room.findUniqueOrThrow({
+    where: { id: roomId },
+    select: { matrixRoomId: true, moodleCourseId: true },
+  });
+
+  const summary = await getRoomStateSummary(room.matrixRoomId);
+  if (summary.moodleCourseId === null) {
+    return {
+      linked: false,
+      courseId: null,
+      courseShortname: null,
+      ragAutoEnabled: false,
+      indexableResources: 0,
+      message:
+        "Ce salon n'a pas de marker Moodle (org.matrix.moodle.course_id) dans son m.room.create — il n'a pas été créé par le plugin mod_matrix.",
+    };
+  }
+
+  // Résolution du MoodleCourse interne à partir du moodleId Moodle.
+  const candidates = await prisma.moodleCourse.findMany({
+    where: { moodleId: summary.moodleCourseId },
+    select: { id: true, shortname: true },
+  });
+
+  if (candidates.length === 0) {
+    // Marker présent mais pas de MoodleCourse en DB — on tag source=MOODLE
+    // sans lier. L'ADMIN doit d'abord synchroniser le cours côté /moodle.
+    await prisma.room.update({
+      where: { id: roomId },
+      data: { source: "MOODLE" },
+    });
+    revalidatePath(`/rooms/${roomId}`);
+    revalidatePath("/rooms");
+    return {
+      linked: false,
+      courseId: null,
+      courseShortname: null,
+      ragAutoEnabled: false,
+      indexableResources: 0,
+      message: `Marker Moodle détecté (course=${summary.moodleCourseId}) mais ce cours n'est pas encore synchronisé dans AI Bot Manager. Lance d'abord la sync côté /moodle.`,
+    };
+  }
+
+  if (candidates.length > 1) {
+    // Multi-plateformes avec même moodleId — on ne peut pas trancher.
+    return {
+      linked: false,
+      courseId: null,
+      courseShortname: null,
+      ragAutoEnabled: false,
+      indexableResources: 0,
+      message: `Lien ambigu : le moodleId ${summary.moodleCourseId} existe sur ${candidates.length} plateformes différentes. Lien à faire manuellement.`,
+    };
+  }
+
+  const target = candidates[0];
+  await prisma.room.update({
+    where: { id: roomId },
+    data: { source: "MOODLE", moodleCourseId: target.id },
+  });
+
+  const rag = await enableRagIfCourseIndexable(target.id);
+
+  log.info(
+    {
+      roomId: room.matrixRoomId,
+      courseId: target.id,
+      shortname: target.shortname,
+      ragAutoEnabled: rag.enabled,
+      by: session.user.email,
+    },
+    "Lien Moodle actualisé pour le salon",
+  );
+
+  revalidatePath(`/rooms/${roomId}`);
+  revalidatePath("/rooms");
+  return {
+    linked: true,
+    courseId: target.id,
+    courseShortname: target.shortname,
+    ragAutoEnabled: rag.enabled,
+    indexableResources: rag.indexableResources,
+    message: rag.enabled
+      ? `Lié au cours "${target.shortname}" — RAG activé (${rag.indexableResources} ressource(s) indexable(s)).`
+      : `Lié au cours "${target.shortname}" — RAG non activé (0 ressource indexable ou déjà activé manuellement).`,
+  };
 }
 
 /**
