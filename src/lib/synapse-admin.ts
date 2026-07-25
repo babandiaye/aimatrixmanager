@@ -336,6 +336,36 @@ export async function enableRoomEncryption(
   });
 }
 
+/**
+ * Purge complète d'un salon côté Matrix (Synapse admin API v2, async).
+ *
+ * Comportement :
+ *  - `block: false`     → on n'interdit pas la recréation d'un salon avec
+ *    le même room_id (utile si mod_matrix devait le re-provisionner).
+ *  - `purge: true`      → efface tout l'historique côté serveur (events,
+ *    médias uploadés, keys). **Irréversible.**
+ *  - `force_purge: true` → force la purge même si des membres restent
+ *    joignables (défensif — évite qu'un membre distant fédéré bloque).
+ *
+ * L'endpoint v2 est **asynchrone** : Synapse renvoie immédiatement un
+ * `delete_id` et exécute la purge en background. On ne l'attend pas :
+ * pour l'UX de suppression on préfère un retour rapide, la ligne DB est
+ * détruite dans la foulée côté aibotmanager.
+ *
+ * Doc : https://element-hq.github.io/synapse/latest/admin_api/rooms.html#delete-room-api
+ */
+export async function deleteRoomHard(
+  matrixRoomId: string,
+): Promise<{ delete_id: string }> {
+  return call(
+    `/_synapse/admin/v2/rooms/${encodeURIComponent(matrixRoomId)}`,
+    {
+      method: "DELETE",
+      body: { block: false, purge: true, force_purge: true },
+    },
+  );
+}
+
 /** Itère toutes les pages pour récupérer la liste complète. */
 export async function listAllRooms(): Promise<SynapseRoom[]> {
   const rooms: SynapseRoom[] = [];

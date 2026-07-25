@@ -25,28 +25,43 @@ import {
   LockClosedIcon,
   ExclamationTriangleIcon,
   ShieldCheckIcon,
+  TrashIcon,
 } from "@heroicons/react/24/outline";
-import { activateRoomEncryption, renameRoom } from "../actions";
+import { useRouter } from "next/navigation";
+import { activateRoomEncryption, deleteRoom, renameRoom } from "../actions";
 
 export function AdminCard({
   roomId,
   matrixRoomId,
   currentName,
   isEncrypted,
+  canDelete,
 }: {
   roomId: string;
   matrixRoomId: string;
   currentName: string | null;
   isEncrypted: boolean;
+  canDelete: boolean;
 }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Administration</CardTitle>
-        <CardDescription>
-          Gestion du salon depuis AI Bot Manager — change le nom ou active le
-          chiffrement E2EE.
-        </CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle>Administration</CardTitle>
+            <CardDescription>
+              Gestion du salon depuis AI Bot Manager — change le nom ou active
+              le chiffrement E2EE.
+            </CardDescription>
+          </div>
+          {canDelete && (
+            <DeleteRoomButton
+              roomId={roomId}
+              matrixRoomId={matrixRoomId}
+              currentName={currentName}
+            />
+          )}
+        </div>
       </CardHeader>
       <CardContent className="space-y-3">
         <RenameRow
@@ -337,5 +352,152 @@ function EncryptionRow({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// ─── Supprimer le salon (ADMIN uniquement) ────────────────────────────────
+
+function DeleteRoomButton({
+  roomId,
+  matrixRoomId,
+  currentName,
+}: {
+  roomId: string;
+  matrixRoomId: string;
+  currentName: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pending, start] = useTransition();
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!open) {
+      setConfirm("");
+      setError(null);
+    }
+  }, [open]);
+
+  const expected = "SUPPRIMER";
+  const valid = confirm.trim().toUpperCase() === expected;
+
+  const submit = () => {
+    if (!valid) return;
+    setError(null);
+    start(async () => {
+      try {
+        await deleteRoom(roomId);
+        setOpen(false);
+        router.push("/rooms");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Erreur");
+      }
+    });
+  };
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="text-status-error hover:bg-status-error/10 hover:text-status-error"
+        title="Supprimer ce salon"
+        aria-label="Supprimer ce salon"
+        onClick={() => setOpen(true)}
+      >
+        <TrashIcon className="size-5" />
+      </Button>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <div className="flex items-center gap-3">
+              <div className="rounded-lg bg-status-error/10 p-2">
+                <ExclamationTriangleIcon className="size-6 text-status-error" />
+              </div>
+              <div>
+                <DialogTitle>Supprimer le salon ?</DialogTitle>
+                <DialogDescription>
+                  Purge complète Matrix + AI Bot Manager
+                </DialogDescription>
+              </div>
+            </div>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="rounded-lg border border-status-error/30 bg-status-error/5 p-3 text-sm space-y-2">
+              <p className="font-medium text-foreground">
+                Salon :{" "}
+                <span className="font-mono">
+                  {currentName ?? "(sans nom)"}
+                </span>
+              </p>
+              <p className="text-xs text-muted-foreground font-mono break-all">
+                {matrixRoomId}
+              </p>
+              <ul className="mt-2 list-disc list-inside space-y-1 text-muted-foreground text-xs">
+                <li>
+                  L&apos;historique complet est effacé côté Synapse
+                  (messages, médias, keys).
+                </li>
+                <li>
+                  Tous les membres sont éjectés — le salon disparaît
+                  d&apos;Element.
+                </li>
+                <li>
+                  Les assignations d&apos;agents et l&apos;audit trail sont
+                  supprimés en cascade.
+                </li>
+                <li className="text-status-error font-medium">
+                  Action irréversible.
+                </li>
+              </ul>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="confirm-delete">
+                Tape{" "}
+                <code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+                  {expected}
+                </code>{" "}
+                pour confirmer
+              </Label>
+              <Input
+                id="confirm-delete"
+                autoFocus
+                autoComplete="off"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                className="font-mono uppercase"
+              />
+            </div>
+            {error && (
+              <div className="rounded-lg bg-status-error/10 p-3 text-sm text-status-error">
+                {error}
+              </div>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setOpen(false)}
+              disabled={pending}
+            >
+              Annuler
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={!valid || pending}
+              onClick={submit}
+            >
+              <TrashIcon className="size-4" />
+              {pending ? "Suppression..." : "Supprimer définitivement"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

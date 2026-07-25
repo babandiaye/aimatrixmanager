@@ -11,6 +11,7 @@ import {
 import type { Prisma, UserRole } from "@prisma/client";
 import { decrypt } from "@/lib/crypto";
 import {
+  deleteRoomHard,
   enableRoomEncryption,
   getRoomStateSummary,
   joinUserToRoom,
@@ -515,6 +516,46 @@ export async function activateRoomEncryption(roomId: string) {
 
   log.info({ roomId: room.matrixRoomId }, "Chiffrement E2EE activé");
   revalidatePath(`/rooms/${roomId}`);
+  revalidatePath("/rooms");
+}
+
+/**
+ * Suppression complète d'un salon — ADMIN uniquement.
+ *
+ * Fait DEUX choses, dans cet ordre :
+ *  1. `deleteRoomHard()` sur Synapse admin v2 → purge async côté Matrix
+ *     (historique, keys, médias, kick des membres). Irréversible.
+ *  2. `prisma.room.delete()` → cascade Prisma sur RoomAgent + AuditLog.
+ *
+ * Portée voulue : ADMIN seul. On ne passe pas par `rooms.assign` (qui
+ * inclurait MANAGER) mais par un test strict `role === "ADMIN"`.
+ *
+ * Si l'appel Synapse échoue, on NE supprime PAS la ligne DB — sinon on
+ * se retrouve avec un salon Matrix orphelin invisible depuis l'app.
+ */
+export async function deleteRoom(roomId: string): Promise<void> {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  if (session.user.role !== "ADMIN") {
+    throw new Error("Action réservée aux administrateurs");
+  }
+
+  const room = await prisma.room.findUniqueOrThrow({
+    where: { id: roomId },
+    select: { matrixRoomId: true, name: true },
+  });
+
+  await deleteRoomHard(room.matrixRoomId);
+  await prisma.room.delete({ where: { id: roomId } });
+
+  log.warn(
+    {
+      roomId: room.matrixRoomId,
+      name: room.name,
+      by: session.user.email,
+    },
+    "Salon supprimé (purge Matrix + DB)",
+  );
   revalidatePath("/rooms");
 }
 

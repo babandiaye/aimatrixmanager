@@ -259,6 +259,7 @@ export default async function RoomDetailPage({
           matrixRoomId={room.matrixRoomId}
           currentName={room.name}
           isEncrypted={room.isEncrypted}
+          canDelete={session.user.role === "ADMIN"}
         />
       )}
 
