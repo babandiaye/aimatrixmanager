@@ -5,7 +5,7 @@ import { canAny } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { syncMatrixActivitiesForPlatform } from "../moodle/actions";
-import { listAllRooms } from "@/lib/synapse-admin";
+import { getRoomStateSummary, listAllRooms } from "@/lib/synapse-admin";
 import { revalidatePath } from "next/cache";
 
 const log = logger.child({ mod: "mes-cours-actions" });
@@ -80,17 +80,56 @@ export async function refreshMyCoursesFromMoodle(): Promise<{
       const existing = await prisma.room.findUnique({
         where: { matrixRoomId: r.room_id },
       });
-      const data = {
+
+      // Même logique que syncRoomsFromSynapse : on lit m.room.create pour
+      // détecter les salons Moodle (org.matrix.moodle.course_id) et on
+      // utilise le vrai flag is_direct des member events plutôt que
+      // l'ancien heuristique joined_members <= 2.
+      let stateSummary: Awaited<ReturnType<typeof getRoomStateSummary>>;
+      try {
+        stateSummary = await getRoomStateSummary(r.room_id);
+      } catch (e) {
+        log.warn(
+          { err: e, roomId: r.room_id },
+          "getRoomStateSummary échoué — fallback neutre",
+        );
+        stateSummary = { moodleCourseId: null, isDirect: false };
+      }
+
+      let moodleCourseIdDb: string | null = null;
+      if (stateSummary.moodleCourseId !== null) {
+        const candidates = await prisma.moodleCourse.findMany({
+          where: { moodleId: stateSummary.moodleCourseId },
+          select: { id: true },
+        });
+        if (candidates.length === 1) moodleCourseIdDb = candidates[0].id;
+      }
+
+      const baseData = {
         name: r.name,
-        isDirect: r.joined_members <= 2,
+        isDirect: stateSummary.isDirect,
         isEncrypted: !!r.encryption,
       };
+      const moodleData: {
+        source?: "MOODLE";
+        moodleCourseId?: string;
+      } = {};
+      if (stateSummary.moodleCourseId !== null) {
+        moodleData.source = "MOODLE";
+        if (moodleCourseIdDb !== null) {
+          moodleData.moodleCourseId = moodleCourseIdDb;
+        }
+      }
+
       if (existing) {
-        await prisma.room.update({ where: { id: existing.id }, data });
+        await prisma.room.update({
+          where: { id: existing.id },
+          data: { ...baseData, ...moodleData },
+        });
         roomsUpdated++;
       } else {
         await prisma.room.create({
-          data: { matrixRoomId: r.room_id, ...data },
+          data: { matrixRoomId: r.room_id, ...baseData, ...moodleData },
         });
         roomsImported++;
       }

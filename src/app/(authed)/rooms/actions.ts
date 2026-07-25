@@ -12,6 +12,7 @@ import type { Prisma, UserRole } from "@prisma/client";
 import { decrypt } from "@/lib/crypto";
 import {
   enableRoomEncryption,
+  getRoomStateSummary,
   joinUserToRoom,
   listAllRooms,
   setRoomName,
@@ -84,30 +85,99 @@ export async function syncRoomsFromSynapse(): Promise<{
 
   const synapseRooms = await listAllRooms();
   let inserted = 0,
-    updated = 0;
+    updated = 0,
+    moodleLinked = 0;
 
   for (const r of synapseRooms) {
     const existing = await prisma.room.findUnique({
       where: { matrixRoomId: r.room_id },
     });
-    const data = {
+
+    // Lit l'état complet du salon pour deux infos :
+    //   1. `org.matrix.moodle.course_id` posé par mod_matrix dans
+    //      `m.room.create` → source d'origine du salon.
+    //   2. `is_direct: true` dans les member events → seule vraie
+    //      sémantique Matrix d'un DM (l'ancien heuristique
+    //      `joined_members <= 2` flagait à tort les petits groupes).
+    // Best-effort : si le state fetch échoue (salon parti, permissions…),
+    // on retombe sur des valeurs neutres pour ne pas bloquer la sync.
+    let stateSummary: Awaited<ReturnType<typeof getRoomStateSummary>>;
+    try {
+      stateSummary = await getRoomStateSummary(r.room_id);
+    } catch (e) {
+      log.warn(
+        { err: e, roomId: r.room_id },
+        "getRoomStateSummary échoué — fallback neutre",
+      );
+      stateSummary = { moodleCourseId: null, isDirect: false };
+    }
+
+    // Résolution moodleCourseId (interne DB) à partir du moodleId Moodle.
+    // Si plusieurs cours matchent (multi-plateformes avec même course id),
+    // on tag source=MOODLE sans lier — log warn pour investigation.
+    let moodleCourseIdDb: string | null = null;
+    if (stateSummary.moodleCourseId !== null) {
+      const candidates = await prisma.moodleCourse.findMany({
+        where: { moodleId: stateSummary.moodleCourseId },
+        select: { id: true },
+      });
+      if (candidates.length === 1) {
+        moodleCourseIdDb = candidates[0].id;
+      } else if (candidates.length > 1) {
+        log.warn(
+          {
+            roomId: r.room_id,
+            moodleCourseId: stateSummary.moodleCourseId,
+            candidates: candidates.length,
+          },
+          "Lien MoodleCourse ambigu (même moodleId sur plusieurs plateformes) — source=MOODLE sans lien",
+        );
+      }
+      moodleLinked++;
+    }
+
+    const baseData = {
       name: r.name,
-      isDirect: r.joined_members <= 2,
+      isDirect: stateSummary.isDirect,
       isEncrypted: !!r.encryption,
     };
+    // Politique monotone pour ne pas régresser un lien déjà posé par la sync
+    // Moodle (côté /moodle, via matrix_room_id direct ou fuzzy par nom) :
+    //  - source : on n'écrase JAMAIS un MOODLE existant vers MATRIX ; on
+    //    upgrade juste MATRIX → MOODLE si le marker est présent.
+    //  - moodleCourseId : on ne set que si notre lookup a trouvé exactement
+    //    un cours ; sinon on laisse la valeur existante intacte.
+    const moodleData: {
+      source?: "MOODLE";
+      moodleCourseId?: string;
+    } = {};
+    if (stateSummary.moodleCourseId !== null) {
+      moodleData.source = "MOODLE";
+      if (moodleCourseIdDb !== null) {
+        moodleData.moodleCourseId = moodleCourseIdDb;
+      }
+    }
+
     if (existing) {
-      await prisma.room.update({ where: { id: existing.id }, data });
+      await prisma.room.update({
+        where: { id: existing.id },
+        data: { ...baseData, ...moodleData },
+      });
       updated++;
     } else {
       await prisma.room.create({
-        data: { matrixRoomId: r.room_id, ...data },
+        data: {
+          matrixRoomId: r.room_id,
+          ...baseData,
+          ...moodleData,
+        },
       });
       inserted++;
     }
   }
 
   log.info(
-    { total: synapseRooms.length, inserted, updated },
+    { total: synapseRooms.length, inserted, updated, moodleLinked },
     "Sync Synapse rooms",
   );
   revalidatePath("/rooms");

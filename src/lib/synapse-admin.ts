@@ -348,3 +348,44 @@ export async function listAllRooms(): Promise<SynapseRoom[]> {
   }
   return rooms;
 }
+
+/**
+ * Lit deux infos utiles depuis l'état complet d'un salon :
+ *
+ * - `moodleCourseId` : la valeur du champ custom `org.matrix.moodle.course_id`
+ *   posé par le plugin mod_matrix dans le `content` du `m.room.create`.
+ *   Permet d'identifier un salon d'origine Moodle même quand l'API Moodle
+ *   n'expose plus le mapping (target=element-url, activité supprimée…).
+ *
+ * - `isDirect` : true si au moins un `m.room.member` contient
+ *   `is_direct: true` — la vraie sémantique Matrix d'un DM, indépendante
+ *   du nombre de membres. Un salon à 2 membres créé via l'onglet "Rooms"
+ *   d'Element n'est PAS un DM.
+ *
+ * Attention : cet appel fait un fetch supplémentaire /state par salon.
+ * À utiliser dans les sync périodiques, pas dans un rendu synchrone.
+ */
+export async function getRoomStateSummary(matrixRoomId: string): Promise<{
+  moodleCourseId: number | null;
+  isDirect: boolean;
+}> {
+  const enc = encodeURIComponent(matrixRoomId);
+  const data = await call<{
+    state: Array<{
+      type: string;
+      content?: Record<string, unknown>;
+    }>;
+  }>(`/_synapse/admin/v1/rooms/${enc}/state`);
+  const state = data.state ?? [];
+
+  const createEvent = state.find((e) => e.type === "m.room.create");
+  const raw = createEvent?.content?.["org.matrix.moodle.course_id"];
+  const moodleCourseId =
+    typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+
+  const isDirect = state.some(
+    (e) => e.type === "m.room.member" && e.content?.is_direct === true,
+  );
+
+  return { moodleCourseId, isDirect };
+}
