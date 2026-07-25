@@ -116,10 +116,13 @@ export function CourseLinker({
             disabled={pending}
             onValueChange={onSelect}
           >
-            <SelectTrigger>
+            <SelectTrigger className="w-full">
               <SelectValue placeholder="Choisir un cours..." />
             </SelectTrigger>
-            <SelectContent>
+            {/* w-max = popup grandit avec le nom du cours (le plus long
+                dicte la largeur), min = au moins la largeur du trigger,
+                max = plafonné à 90vw pour ne pas déborder sur mobile. */}
+            <SelectContent className="w-max min-w-(--anchor-width) max-w-[min(90vw,720px)]">
               <SelectItem value={NONE_VALUE}>(aucun)</SelectItem>
               {courses.map((c) => (
                 <SelectItem key={c.id} value={c.id}>

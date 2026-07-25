@@ -17,6 +17,7 @@ import { AssignmentsManager } from "./assignments-manager";
 import { CourseLinker } from "./course-linker";
 import { AdminCard } from "./admin-card";
 import { RagIndexer } from "./rag-indexer";
+import { getRoomStateSummary } from "@/lib/synapse-admin";
 
 export default async function RoomDetailPage({
   params,
@@ -132,6 +133,33 @@ export default async function RoomDetailPage({
         })()
       : null;
 
+  // Restreint le sélecteur de cours à la plateforme d'origine du salon —
+  // un salon créé par mod_matrix sur la plateforme P12SEJA ne doit pas
+  // proposer des cours de DISIDEV. Deux sources d'info, dans l'ordre :
+  //
+  //  1. `room.moodleCourse.platformId` — cas nominal (salon déjà lié).
+  //  2. Marker `org.matrix.moodle.course_id` lu depuis Matrix : on
+  //     résout le MoodleCourse correspondant → sa platformId. Best-effort,
+  //     on ignore silencieusement toute erreur pour ne pas casser la page.
+  //
+  // Fallback : `null` → aucune restriction (comportement d'origine, ex.
+  // salon natif Matrix que l'admin veut lier manuellement à un cours).
+  let restrictedPlatformId: string | null = room.moodleCourse?.platformId ?? null;
+  if (restrictedPlatformId === null) {
+    try {
+      const summary = await getRoomStateSummary(room.matrixRoomId);
+      if (summary.moodleCourseId !== null) {
+        const marked = await prisma.moodleCourse.findFirst({
+          where: { moodleId: summary.moodleCourseId },
+          select: { platformId: true },
+        });
+        if (marked) restrictedPlatformId = marked.platformId;
+      }
+    } catch {
+      // silencieux — best-effort
+    }
+  }
+
   const indexableCoursesRaw = await prisma.moodleCourse.findMany({
     where: {
       AND: [
@@ -143,6 +171,10 @@ export default async function RoomDetailPage({
             },
           },
         },
+        // Restriction plateforme du salon
+        ...(restrictedPlatformId !== null
+          ? [{ platformId: restrictedPlatformId }]
+          : []),
         // Scope ENSEIGNANT
         ...(teacherCourseIdsForLinker !== null
           ? [{ id: { in: teacherCourseIdsForLinker } }]
