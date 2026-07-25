@@ -225,15 +225,35 @@ export async function listRoomsPage(opts: {
   return call(`/_synapse/admin/v1/rooms?${params}`);
 }
 
-/** Force un user Matrix à rejoindre un salon (admin-driven join). */
+/**
+ * Force un user Matrix à rejoindre un salon (admin-driven join).
+ *
+ * Idempotent : si le user est déjà membre, Synapse renvoie `M_FORBIDDEN`
+ * avec le message "is already in the room". On avale cette erreur
+ * précise pour ne pas casser les flows de (re)join où l'agent peut déjà
+ * être dedans (assignAgentToRoom, manualRejoinAgent, auto-rejoin sur
+ * kick). Toute autre erreur reste levée.
+ */
 export async function joinUserToRoom(args: {
   matrixUserId: string;
   matrixRoomId: string;
 }): Promise<{ room_id: string }> {
-  return call(
-    `/_synapse/admin/v1/join/${encodeURIComponent(args.matrixRoomId)}`,
-    { method: "POST", body: { user_id: args.matrixUserId } },
-  );
+  try {
+    return await call(
+      `/_synapse/admin/v1/join/${encodeURIComponent(args.matrixRoomId)}`,
+      { method: "POST", body: { user_id: args.matrixUserId } },
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/is already in the room/i.test(msg)) {
+      log.info(
+        { user: args.matrixUserId, room: args.matrixRoomId },
+        "join no-op — user déjà membre",
+      );
+      return { room_id: args.matrixRoomId };
+    }
+    throw e;
+  }
 }
 
 /**
