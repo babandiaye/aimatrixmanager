@@ -38,18 +38,25 @@ import { PageHeader } from "@/components/ui/page-header";
 
 const PAGE_SIZE = 20;
 
-type SortMode = "date" | "source-moodle" | "source-chat";
+type SortMode = "source-moodle" | "date" | "source-chat";
 
 function parseSort(v: string | undefined): SortMode {
-  return v === "source-moodle" || v === "source-chat" ? v : "date";
+  if (v === "date" || v === "source-chat") return v;
+  return "source-moodle";
 }
 
+/**
+ * Trois modes de tri exposés à l'utilisateur, ordre d'affichage dans
+ * les boutons : Moodle (défaut), Récent, Chat.
+ *   - `source-moodle` (défaut) : salons Moodle d'abord, puis date desc
+ *   - `date` : uniquement date desc, mélange sources
+ *   - `source-chat` : salons natifs (MATRIX) d'abord, puis date desc
+ */
 function orderByFor(sort: SortMode): Prisma.RoomOrderByWithRelationInput[] {
-  if (sort === "source-moodle")
-    return [{ source: "desc" }, { discoveredAt: "desc" }];
+  if (sort === "date") return [{ discoveredAt: "desc" }];
   if (sort === "source-chat")
     return [{ source: "asc" }, { discoveredAt: "desc" }];
-  return [{ discoveredAt: "desc" }];
+  return [{ source: "desc" }, { discoveredAt: "desc" }];
 }
 
 export default async function RoomsPage({
@@ -131,14 +138,14 @@ export default async function RoomsPage({
               <span className="text-muted-foreground">Trier par :</span>
               {(
                 [
-                  { mode: "date" as const, label: "Date (récent)" },
-                  { mode: "source-moodle" as const, label: "Moodle d'abord" },
-                  { mode: "source-chat" as const, label: "Chat d'abord" },
+                  { mode: "source-moodle" as const, label: "Moodle" },
+                  { mode: "date" as const, label: "Récent" },
+                  { mode: "source-chat" as const, label: "Chat" },
                 ]
               ).map(({ mode, label }) => {
                 const active = sort === mode;
                 const href =
-                  mode === "date" ? "/rooms" : `/rooms?sort=${mode}`;
+                  mode === "source-moodle" ? "/rooms" : `/rooms?sort=${mode}`;
                 return (
                   <Link
                     key={mode}
@@ -277,7 +284,7 @@ export default async function RoomsPage({
               page={page}
               pageSize={PAGE_SIZE}
               total={total}
-              hrefBase={sort === "date" ? "/rooms" : `/rooms?sort=${sort}`}
+              hrefBase={sort === "source-moodle" ? "/rooms" : `/rooms?sort=${sort}`}
             />
           </CardContent>
         </Card>
