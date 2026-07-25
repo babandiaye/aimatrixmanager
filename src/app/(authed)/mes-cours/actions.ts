@@ -4,7 +4,7 @@ import { auth } from "@/auth";
 import { canAny } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
-import { syncMatrixActivitiesForPlatform } from "../moodle/actions";
+import { syncMatrixActivitiesForPlatformCore } from "@/lib/moodle-matrix-sync";
 import { getRoomStateSummary, listAllRooms } from "@/lib/synapse-admin";
 import { revalidatePath } from "next/cache";
 
@@ -40,9 +40,13 @@ export async function refreshMyCoursesFromMoodle(): Promise<{
 }> {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  // Même permission que /mes-cours pour rester cohérent (ENSEIGNANT ok,
-  // AUDITOR non — pas de raison de laisser un rôle read-only déclencher
-  // des WS calls vers Moodle).
+  // Portée UI : ADMIN/MANAGER/ENSEIGNANT peuvent rafraîchir. AUDITOR
+  // (read-only) est exclu — pas de raison de laisser un rôle purement
+  // consultation déclencher des WS calls vers Moodle. Le bouton est
+  // aussi caché côté page pour ce rôle.
+  if (session.user.role === "AUDITOR") {
+    throw new Error("Permission refusée");
+  }
   if (!canAny(session.user.role, "rooms.view", "rooms.view-own")) {
     throw new Error("Permission refusée");
   }
@@ -162,7 +166,11 @@ export async function refreshMyCoursesFromMoodle(): Promise<{
   let roomsLinked = 0;
   for (const p of platforms) {
     try {
-      const r = await syncMatrixActivitiesForPlatform(p.id);
+      // On appelle le core (pas de vérif `rooms.assign`) : l'auth du user
+      // et sa permission `rooms.view*` a déjà été vérifiée ligne 46. Un
+      // ENSEIGNANT peut donc rafraîchir ses cours sans notif "permission
+      // refusée" pour chaque plateforme comme avant.
+      const r = await syncMatrixActivitiesForPlatformCore(p.id);
       activitiesFound += r.total;
       roomsLinked += r.linkedRooms + r.linkedByName;
     } catch (e) {

@@ -105,7 +105,13 @@ export default async function MesCoursPage() {
           icon={BookOpenIcon}
           title="Mes cours"
           description="Les cours Moodle où tu es enseignant, tuteur ou tuteur suivi."
-          actions={<RefreshMyCoursesButton />}
+          actions={
+            // AUDITOR = rôle read-only : pas de raison de laisser déclencher
+            // des WS calls vers Moodle depuis /mes-cours.
+            session.user.role !== "AUDITOR" ? (
+              <RefreshMyCoursesButton />
+            ) : null
+          }
         />
         {lastSync && (
           <p className="mt-3 flex flex-wrap items-center gap-1.5 pl-16 text-xs text-muted-foreground sm:pl-20">
