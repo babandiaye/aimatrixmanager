@@ -28,6 +28,7 @@ export function CourseLinker({
   currentCourse,
   courses,
   canAssign,
+  originCourseNote,
 }: {
   roomId: string;
   currentCourseId: string | null;
@@ -38,6 +39,10 @@ export function CourseLinker({
   } | null;
   courses: CourseChoice[];
   canAssign: boolean;
+  // Message optionnel affiché sous le dropdown quand le cours d'origine
+  // détecté n'a pas encore de ressource indexable — invite l'admin à
+  // sync le contenu Moodle plutôt que de masquer le cours.
+  originCourseNote?: string | null;
 }) {
   const [pending, start] = useTransition();
 
@@ -154,6 +159,11 @@ export function CourseLinker({
           </Button>
         )}
       </div>
+      {originCourseNote && (
+        <p className="rounded-md border border-status-processing/30 bg-status-processing/5 px-3 py-2 text-xs leading-relaxed text-status-processing">
+          {originCourseNote}
+        </p>
+      )}
     </div>
   );
 }

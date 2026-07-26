@@ -17,7 +17,7 @@ import { AssignmentsManager } from "./assignments-manager";
 import { CourseLinker } from "./course-linker";
 import { AdminCard } from "./admin-card";
 import { RagIndexer } from "./rag-indexer";
-import { getRoomStateSummary } from "@/lib/synapse-admin";
+import { resolveOriginCourse } from "@/lib/room-origin-course";
 
 export default async function RoomDetailPage({
   params,
@@ -133,96 +133,139 @@ export default async function RoomDetailPage({
         })()
       : null;
 
-  // Restreint le sélecteur de cours à la plateforme d'origine du salon —
-  // un salon créé par mod_matrix sur la plateforme P12SEJA ne doit pas
-  // proposer des cours de DISIDEV. Deux sources d'info, dans l'ordre :
+  // Résout le "cours d'origine" du salon (lien direct, activité mod_matrix,
+  // ou marker Matrix). Détermine deux modes d'affichage du CourseLinker :
   //
-  //  1. `room.moodleCourse.platformId` — cas nominal (salon déjà lié).
-  //  2. Marker `org.matrix.moodle.course_id` lu depuis Matrix : on
-  //     résout le MoodleCourse correspondant → sa platformId. Best-effort,
-  //     on ignore silencieusement toute erreur pour ne pas casser la page.
+  //  - **Restreint** — le salon a un cours d'origine identifié : le
+  //    dropdown ne propose que « aucun » + ce cours (même s'il n'a
+  //    aucune ressource indexable — on le signale via `originCourseNote`
+  //    plutôt que de le masquer, sinon l'utilisateur croit que la config
+  //    est cassée).
   //
-  // Fallback : `null` → aucune restriction (comportement d'origine, ex.
-  // salon natif Matrix que l'admin veut lier manuellement à un cours).
-  let restrictedPlatformId: string | null = room.moodleCourse?.platformId ?? null;
-  if (restrictedPlatformId === null) {
-    try {
-      const summary = await getRoomStateSummary(room.matrixRoomId);
-      if (summary.moodleCourseId !== null) {
-        const marked = await prisma.moodleCourse.findFirst({
-          where: { moodleId: summary.moodleCourseId },
-          select: { platformId: true },
-        });
-        if (marked) restrictedPlatformId = marked.platformId;
-      }
-    } catch {
-      // silencieux — best-effort
-    }
-  }
+  //  - **Large** — salon natif Matrix (aucun marker, aucune activité,
+  //    aucun lien) : on garde le comportement historique = tous les
+  //    cours indexables (filtre INDEXABLE_MODNAMES + scope ENSEIGNANT).
+  //    Sert aux ADMIN qui veulent lier à la main un salon Element à un
+  //    cours Moodle.
+  const origin = await resolveOriginCourse(
+    room.matrixRoomId,
+    room.moodleCourseId,
+  );
 
-  const indexableCoursesRaw = await prisma.moodleCourse.findMany({
-    where: {
-      AND: [
-        // Au moins une ressource RAGable (jointure via sections)
-        {
+  let allCourses: Array<{
+    id: string;
+    platformKey: string;
+    shortname: string;
+    fullname: string;
+    bookCount: number;
+  }> = [];
+  let originCourseNote: string | null = null;
+
+  if (origin) {
+    // ─── Mode restreint : uniquement le cours d'origine ─────────────
+    // Pas de filtre INDEXABLE_MODNAMES sur ce mode — on veut voir le
+    // cours même s'il n'a pas encore de PDF/livre (l'admin doit pouvoir
+    // le lier maintenant et sync le contenu ensuite).
+    const inScope =
+      teacherCourseIdsForLinker === null ||
+      teacherCourseIdsForLinker.includes(origin.courseId);
+
+    if (inScope) {
+      const originData = await prisma.moodleCourse.findUnique({
+        where: { id: origin.courseId },
+        include: {
+          platform: { select: { key: true } },
           sections: {
-            some: {
-              resources: { some: { modname: { in: INDEXABLE_MODNAMES } } },
+            select: {
+              resources: {
+                where: { modname: { in: INDEXABLE_MODNAMES } },
+                select: { id: true, modname: true },
+              },
             },
           },
         },
-        // Restriction plateforme du salon
-        ...(restrictedPlatformId !== null
-          ? [{ platformId: restrictedPlatformId }]
-          : []),
-        // Scope ENSEIGNANT
-        ...(teacherCourseIdsForLinker !== null
-          ? [{ id: { in: teacherCourseIdsForLinker } }]
-          : []),
-      ],
-    },
-    include: {
-      platform: { select: { key: true } },
-      sections: {
-        select: {
-          resources: {
-            where: { modname: "book" },
-            select: { id: true },
+      });
+      if (originData) {
+        const allResources = originData.sections.flatMap((s) => s.resources);
+        const bookCount = allResources.filter((r) => r.modname === "book").length;
+        allCourses = [
+          {
+            id: originData.id,
+            platformKey: originData.platform.key,
+            shortname: originData.shortname,
+            fullname: originData.fullname,
+            bookCount,
           },
-        },
+        ];
+        if (allResources.length === 0) {
+          originCourseNote =
+            "Ce cours d'origine n'a encore aucune ressource indexable (livre, PDF, page, dossier…). Le lien peut être posé, mais le RAG ne trouvera rien tant que du contenu n'aura pas été synchronisé côté Moodle.";
+        }
+      }
+    }
+  } else {
+    // ─── Mode large : fallback pour les salons natifs Matrix ────────
+    const indexableCoursesRaw = await prisma.moodleCourse.findMany({
+      where: {
+        AND: [
+          {
+            sections: {
+              some: {
+                resources: { some: { modname: { in: INDEXABLE_MODNAMES } } },
+              },
+            },
+          },
+          ...(teacherCourseIdsForLinker !== null
+            ? [{ id: { in: teacherCourseIdsForLinker } }]
+            : []),
+        ],
       },
-    },
-    orderBy: [{ platform: { key: "asc" } }, { shortname: "asc" }],
-  });
-
-  // Garantit que le cours actuellement lié est dans la liste (cas où il
-  // ne matche plus les filtres ci-dessus : indexation retirée, ENSEIGNANT
-  // qui a perdu le cours côté Moodle, etc.).
-  if (
-    room.moodleCourseId &&
-    !indexableCoursesRaw.some((c) => c.id === room.moodleCourseId)
-  ) {
-    const fallback = await prisma.moodleCourse.findUnique({
-      where: { id: room.moodleCourseId },
       include: {
         platform: { select: { key: true } },
         sections: {
           select: {
-            resources: { where: { modname: "book" }, select: { id: true } },
+            resources: {
+              where: { modname: "book" },
+              select: { id: true },
+            },
           },
         },
       },
+      orderBy: [{ platform: { key: "asc" } }, { shortname: "asc" }],
     });
-    if (fallback) indexableCoursesRaw.unshift(fallback);
-  }
 
-  const allCourses = indexableCoursesRaw.map((c) => ({
-    id: c.id,
-    platformKey: c.platform.key,
-    shortname: c.shortname,
-    fullname: c.fullname,
-    bookCount: c.sections.reduce((s, sec) => s + sec.resources.length, 0),
-  }));
+    // Garantit que le cours actuellement lié est présent — cas d'un
+    // salon dont le cours a perdu son indexabilité mais qu'on veut
+    // encore pouvoir délier depuis l'UI.
+    if (
+      room.moodleCourseId &&
+      !indexableCoursesRaw.some((c) => c.id === room.moodleCourseId)
+    ) {
+      const fallback = await prisma.moodleCourse.findUnique({
+        where: { id: room.moodleCourseId },
+        include: {
+          platform: { select: { key: true } },
+          sections: {
+            select: {
+              resources: {
+                where: { modname: "book" },
+                select: { id: true },
+              },
+            },
+          },
+        },
+      });
+      if (fallback) indexableCoursesRaw.unshift(fallback);
+    }
+
+    allCourses = indexableCoursesRaw.map((c) => ({
+      id: c.id,
+      platformKey: c.platform.key,
+      shortname: c.shortname,
+      fullname: c.fullname,
+      bookCount: c.sections.reduce((s, sec) => s + sec.resources.length, 0),
+    }));
+  }
 
   return (
     <div className="space-y-6">
@@ -341,6 +384,7 @@ export default async function RoomDetailPage({
             }
             courses={allCourses}
             canAssign={canAssign}
+            originCourseNote={originCourseNote}
           />
         </CardContent>
       </Card>
