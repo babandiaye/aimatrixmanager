@@ -374,6 +374,34 @@ Crée un user Moodle de service (rôle `Manager` au niveau site, pas
 Note le token : il sera chiffré AES-256-GCM en DB par aibotmanager. Il n'a
 pas besoin d'être communiqué autrement.
 
+⚠️ Le rôle `Manager` doit être assigné au **contexte système**, pas à des
+cours individuels. Un compte aux droits limités ne voit qu'une partie des
+cours : `mod_matrix_get_matrices_by_courses` retourne alors des
+`warnings: "No access rights in course context"` et les activités des
+cours concernés sont invisibles.
+
+### 5.3 bis — Réglage `showuseridentity` (indispensable)
+
+> **Site administration → Users → Permissions → User policies → Show user identity**
+> → cocher **Email address**
+
+Sans ce réglage, `core_user_get_users_by_field` avec `field=email` retourne
+**un tableau vide** au lieu d'une erreur, et le champ `email` disparaît des
+objets utilisateur retournés. Conséquence : `resolveTeacherCourseIds` ne
+peut pas résoudre le compte Moodle des enseignants, la plateforme n'entre
+jamais dans `User.moodleUserMap`, et `/mes-cours` reste vide **sans aucun
+message d'erreur**.
+
+Vérification :
+
+```bash
+curl -s "<BASE_URL>/webservice/rest/server.php?wstoken=<TOKEN>\
+&wsfunction=core_user_get_users_by_field&moodlewsrestformat=json\
+&field=email&values[0]=<EMAIL_D_UN_ENSEIGNANT>"
+# → []      : réglage manquant
+# → [{...}] : OK
+```
+
 ### 5.4 Plugin mod_matrix (Famedly)
 
 Pour que les salons mod_matrix créés depuis Moodle soient associés

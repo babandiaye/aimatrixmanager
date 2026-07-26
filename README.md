@@ -97,7 +97,7 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 - **Synapse Matrix** déployé + access_token admin
 - **Postgres 15 + pgvector 0.8** (image `pgvector/pgvector:pg15`)
 - **Keycloak realm** avec client OIDC `aibotmanager` + **mapper `affiliation`** sur l'id_token (sinon tous les users sont rejetés)
-- **Moodle 4.x** avec service WS dédié + 8 fonctions WS (cf. [DEPLOYMENT.md §5](DEPLOYMENT.md#étape-5--moodle))
+- **Moodle 4.x** avec service WS dédié + 8 fonctions WS + `showuseridentity` incluant `email` (cf. [DEPLOYMENT.md §5](DEPLOYMENT.md#étape-5--moodle))
 - **Plugin [`mod_matrix` (Famedly)](https://github.com/element-hq/moodle-mod_matrix)** sur chaque Moodle
 - **Ollama** compat OpenAI avec `nomic-embed-text` chargé
 - **Clé API Anthropic**
@@ -124,6 +124,28 @@ Chaque agent = un compte Matrix dédié, piloté par Claude (Anthropic), capable
 ```bash
 pnpm exec tsx scripts/test-moodle-functions.ts
 ```
+
+### Au-delà des fonctions : les réglages de site Moodle
+
+Cocher les 8 fonctions **ne suffit pas**. Deux réglages côté Moodle conditionnent le bon fonctionnement, et leur absence est **silencieuse** — le bouton *Tester* passe au vert alors que `/mes-cours` reste vide.
+
+| Réglage | Où | Pourquoi c'est indispensable |
+|---|---|---|
+| **`showuseridentity` doit inclure `email`** | *Admin site → Utilisateurs → Permissions → Politiques des utilisateurs → Afficher l'identité de l'utilisateur* | `core_user_get_users_by_field` avec `field=email` retourne **un tableau vide** (pas une erreur) si `email` n'est pas dans cette liste. La résolution enseignant échoue donc pour toute la plateforme. Le champ `email` disparaît aussi des objets utilisateur retournés. |
+| **Compte WS avec droits suffisants** | *Admin site → Web services → Gérer les jetons* | Le compte rattaché au token doit voir les utilisateurs et les cours au **contexte système** (typiquement l'admin du site, `userid=2`, ou un rôle Manager système). Un compte ordinaire produit des `warnings: "No access rights in course context"` et ne voit qu'une partie des cours. |
+
+**Diagnostic rapide** — si `field=email` renvoie `[]` alors que `field=id` ou `field=username` renvoient l'utilisateur, c'est le gate `showuseridentity` :
+
+```bash
+# Remplacer <BASE_URL>, <TOKEN>, <EMAIL>
+curl -s "<BASE_URL>/webservice/rest/server.php?wstoken=<TOKEN>\
+&wsfunction=core_user_get_users_by_field&moodlewsrestformat=json\
+&field=email&values[0]=<EMAIL>"
+# → []         : showuseridentity ne contient pas `email` → à corriger
+# → [{...}]    : OK
+```
+
+Après correction côté Moodle, le cache teacher-scope (TTL 1 h) doit être vidé : bouton **Rafraîchir depuis Moodle** sur `/mes-cours`.
 
 ---
 
@@ -435,12 +457,57 @@ Logs **pino** redactent automatiquement `*.password`, `*.token`, `*.access_token
 - L'email Keycloak de l'user doit correspondre **exactement** à son email Moodle (le matching est strict).
 - Le user doit avoir le rôle Moodle `editingteacher` ou `teacher` dans au moins un cours.
 - Le service WS doit avoir les 3 fonctions `core_user_get_users_by_field`, `core_enrol_get_users_courses`, `core_enrol_get_enrolled_users`.
-- Le cache est de 1h dans `User.moodleUserMap` — pour forcer un refresh : `UPDATE "User" SET "lastMoodleSyncAt" = NULL WHERE email = '<email>';`
+- **`showuseridentity` doit inclure `email`** côté Moodle — sinon `core_user_get_users_by_field(field=email)` retourne `[]` sans erreur, `resolveTeacherCourseIds` fait un `continue` muet et la plateforme **n'apparaît jamais** dans `User.moodleUserMap`. Voir [§ Au-delà des fonctions](#au-delà-des-fonctions--les-réglages-de-site-moodle).
+- Le cache est de 1h dans `User.moodleUserMap` — pour forcer un refresh : bouton **Rafraîchir depuis Moodle** sur `/mes-cours`, ou `UPDATE "User" SET "lastMoodleSyncAt" = NULL WHERE email = '<email>';`
+
+**Isoler la plateforme fautive** — comparer les clés présentes dans le cache avec les plateformes activées :
+
+```sql
+SELECT p.key,
+       (u."moodleUserMap" ? p.id) AS resolue
+FROM "MoodlePlatform" p
+CROSS JOIN "User" u
+WHERE p.enabled AND u.email = '<email>';
+```
+
+Une plateforme à `resolue = false` n'a pas pu résoudre le compte : vérifier `showuseridentity` et les droits du compte WS sur celle-ci.
 
 ### Une activité mod_matrix créée côté Moodle n'apparaît pas dans `/moodle/[id]/activities`
 - La synchro mod_matrix est manuelle : aller sur `/moodle/[id]/activities` → bouton **Synchroniser**.
 - Le service WS doit avoir `mod_matrix_get_matrices_by_courses` (sinon `accessexception`).
 - Si l'activité est en mode `target=element-url` (URL Element au lieu de room Matrix native), le `matrix_room_id` est vide côté Moodle → on fait un fallback fuzzy par nom de room. Si plusieurs candidats matchent, le lien est skip (logué en warn).
+
+### Un salon Moodle n'est pas lié à son cours (`source=MATRIX` ou `Cours Moodle` vide)
+
+Trois causes possibles, par ordre de fréquence :
+
+1. **Mode `target=element-url` + activité multi-groupes.** Le plugin crée un salon par groupe Moodle (`Cours - Activité - Groupe A`, `- Groupe B`) mais laisse `matrix_room_id` vide dans sa table. Le lien direct échoue, et le fallback fuzzy par nom trouve **plusieurs** candidats (tous contiennent le nom de l'activité) → il renonce par prudence. Résultat : les salons de groupe restent non liés.
+
+2. **Collision de `moodleId` entre plateformes.** Deux Moodle distincts peuvent avoir un cours portant le même identifiant numérique (ex. `moodleId=50` sur deux plateformes). La résolution via le marqueur Matrix `org.matrix.moodle.course_id` trouve alors 2 candidats et refuse de lier (logué en warn).
+
+3. **Le cours n'est pas encore synchronisé** dans AI Bot Manager — lancer d'abord la sync des cours sur `/moodle`.
+
+**Contournement immédiat** : sur `/rooms/[id]`, carte *Administration* → bouton **Actualiser** (relance la détection pour ce seul salon), ou sélectionner le cours à la main dans *Cours Moodle lié*.
+
+**Marqueurs posés par le plugin** dans le `content` de l'événement `m.room.create` — utiles pour diagnostiquer :
+
+```jsonc
+{
+  "org.matrix.moodle.course_id": 50,   // cours d'origine
+  "org.matrix.moodle.group_id": 15     // groupe Moodle (activités multi-groupes)
+}
+```
+
+À lire via l'API admin Synapse :
+
+```bash
+curl -s "$MATRIX_HOMESERVER/_synapse/admin/v1/rooms/$(python3 -c \
+  "import urllib.parse;print(urllib.parse.quote('<ROOM_ID>',safe=''))")/state" \
+  -H "Authorization: Bearer $SYNAPSE_ADMIN_TOKEN" \
+  | python3 -c "import json,sys;print([e['content'] for e in json.load(sys.stdin)['state'] if e['type']=='m.room.create'])"
+```
+
+La réponse de `mod_matrix_get_matrices_by_courses` expose par ailleurs `wwwroot` (URL de la plateforme, lève la collision du point 2) et `activity_uid` (identifiant stable globalement unique de l'activité).
 
 ### Synapse `429 Too Many Requests` lors de la création d'une activité mod_matrix
 - Le plugin invite tous les inscrits du cours d'un coup → dépasse les rate limits `rc_invites` par défaut. Augmenter dans `/etc/matrix-synapse/homeserver.yaml` :
