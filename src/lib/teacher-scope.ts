@@ -108,17 +108,39 @@ export async function resolveTeacherCourseIds(
   return dbCourseIds;
 }
 
+/**
+ * Résout le scope enseignant sur chaque plateforme et met le cache à jour.
+ *
+ * Retourne la liste des plateformes où le compte Moodle n'a **pas** pu
+ * être résolu, pour que l'appelant puisse la remonter à l'UI. Sans ça,
+ * une plateforme mal configurée disparaît en silence : l'utilisateur voit
+ * simplement moins de cours, sans savoir pourquoi.
+ *
+ * Deux causes possibles d'échec, toutes deux invisibles côté Moodle :
+ *  - `showuseridentity` n'inclut pas `email` ET le username ne vaut pas
+ *    l'email (cf. le fallback dans `getUserByEmail`) ;
+ *  - le compte WS n'a pas les droits de voir les utilisateurs.
+ */
 async function syncTeacherFromMoodle(
   userId: string,
   email: string,
   platforms: Array<{ id: string; key: string; baseUrl: string; wsToken: string }>,
-): Promise<void> {
+): Promise<string[]> {
   const map: Record<string, number[]> = {};
+  const unresolved: string[] = [];
 
   for (const platform of platforms) {
     try {
       const mu = await getUserByEmail(platform, email);
-      if (!mu) continue;
+      if (!mu) {
+        unresolved.push(platform.key);
+        log.warn(
+          { userId, platform: platform.key, email },
+          "Compte Moodle introuvable (email ET username) — vérifier le réglage " +
+            "showuseridentity et les droits du compte de service WS",
+        );
+        continue;
+      }
 
       const enrolled = await getUserEnrolledCourses(platform, mu.id);
       // Filtre par rôle d'enseignant — `core_enrol_get_users_courses` ne
@@ -146,6 +168,7 @@ async function syncTeacherFromMoodle(
         "Teacher Moodle scope résolu",
       );
     } catch (e) {
+      unresolved.push(platform.key);
       log.warn(
         { userId, platform: platform.key, err: e instanceof Error ? e.message : e },
         "Échec résolution scope sur cette plateforme — skip",
@@ -160,6 +183,24 @@ async function syncTeacherFromMoodle(
       lastMoodleSyncAt: new Date(),
     },
   });
+
+  return unresolved;
+}
+
+/**
+ * Force la re-résolution du scope enseignant, en contournant le TTL.
+ * Retourne les plateformes où le compte n'a pas pu être résolu, pour
+ * affichage dans l'UI (bouton « Rafraîchir depuis Moodle »).
+ */
+export async function refreshTeacherScope(userId: string): Promise<string[]> {
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: userId },
+    select: { email: true },
+  });
+  const platforms = await prisma.moodlePlatform.findMany({
+    where: { enabled: true },
+  });
+  return syncTeacherFromMoodle(userId, user.email, platforms);
 }
 
 // ── Helpers de scoping Prisma ──────────────────────────────────────────────

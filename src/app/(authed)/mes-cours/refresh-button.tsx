@@ -26,6 +26,17 @@ export function RefreshMyCoursesButton() {
               `${r.roomsImported} nouveau(x) salon(s) importé(s) depuis Synapse`,
               `${r.roomsLinked} salon(s) lié(s) à un cours Moodle`,
             ];
+            // Échec de résolution du compte Moodle : sans ce message,
+            // l'utilisateur voit juste moins de cours sans savoir pourquoi.
+            if (r.unresolvedPlatforms.length > 0) {
+              parts.push(
+                `\n⚠ Compte Moodle non résolu sur : ${r.unresolvedPlatforms.join(", ")}` +
+                  `\nLes cours de ces plateformes n'apparaîtront pas.` +
+                  `\nCauses probables : le réglage « Afficher l'identité de l'utilisateur »` +
+                  `\n(showuseridentity) n'inclut pas l'email, ou le compte de service` +
+                  `\nWeb Services n'a pas les droits suffisants.`,
+              );
+            }
             if (r.errors.length > 0) {
               parts.push(`Erreurs :\n- ${r.errors.join("\n- ")}`);
             }

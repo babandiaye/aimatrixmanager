@@ -153,16 +153,57 @@ export type MoodleUserDTO = {
   email: string;
 };
 
+/**
+ * Résout un compte Moodle à partir de l'email Keycloak.
+ *
+ * Deux tentatives, car la recherche par email est conditionnée à un
+ * réglage de site :
+ *
+ *  1. `field=email` — le chemin nominal.
+ *
+ *  2. `field=username` — fallback. Moodle **filtre silencieusement** la
+ *     recherche par email quand `$CFG->showuseridentity` n'inclut pas
+ *     `email` : la fonction retourne `[]` au lieu de lever une erreur,
+ *     ce qui est indistinguable d'un utilisateur absent. `username`
+ *     n'est pas soumis à ce filtrage.
+ *
+ *     Le fallback est valide chez UN-CHK parce que les comptes sont
+ *     provisionnés par Keycloak en OIDC avec `username == email` —
+ *     vérifié sur les 3 plateformes de production : 166 comptes `oidc`,
+ *     zéro divergence. Les seuls comptes où les deux diffèrent sont les
+ *     comptes `manual` de service (`guest`, `admin-ditsi`), qui ne se
+ *     connectent jamais à AI Bot Manager.
+ *
+ * Retourne `null` seulement si les deux chemins échouent — cas d'un
+ * utilisateur réellement absent de la plateforme, ou d'un compte WS aux
+ * droits insuffisants. L'appelant doit logger ce cas (échec silencieux
+ * sinon).
+ */
 export async function getUserByEmail(
   platform: Pick<MoodlePlatform, "baseUrl" | "wsToken">,
   email: string,
 ): Promise<MoodleUserDTO | null> {
-  const r = await callMoodleWS<MoodleUserDTO[]>(
+  const byEmail = await callMoodleWS<MoodleUserDTO[]>(
     platform,
     "core_user_get_users_by_field",
     { field: "email", "values[0]": email },
   );
-  return r?.[0] ?? null;
+  if (byEmail?.[0]) return byEmail[0];
+
+  const byUsername = await callMoodleWS<MoodleUserDTO[]>(
+    platform,
+    "core_user_get_users_by_field",
+    { field: "username", "values[0]": email },
+  );
+  if (byUsername?.[0]) {
+    log.info(
+      { email, moodleUserId: byUsername[0].id },
+      "Compte résolu via username (showuseridentity n'expose pas l'email)",
+    );
+    return byUsername[0];
+  }
+
+  return null;
 }
 
 // ── Liste des cours enrolés d'un user, avec son rôle dans chacun ─────────────

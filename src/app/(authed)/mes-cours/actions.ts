@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { syncMatrixActivitiesForPlatformCore } from "@/lib/moodle-matrix-sync";
 import { getRoomStateSummary, listAllRooms } from "@/lib/synapse-admin";
+import { refreshTeacherScope } from "@/lib/teacher-scope";
 import { revalidatePath } from "next/cache";
 
 const log = logger.child({ mod: "mes-cours-actions" });
@@ -36,6 +37,8 @@ export async function refreshMyCoursesFromMoodle(): Promise<{
   activitiesFound: number;
   roomsImported: number;
   roomsLinked: number;
+  /** Plateformes où le compte Moodle de l'utilisateur n'a pas pu être résolu. */
+  unresolvedPlatforms: string[];
   errors: string[];
 }> {
   const session = await auth();
@@ -51,13 +54,21 @@ export async function refreshMyCoursesFromMoodle(): Promise<{
     throw new Error("Permission refusée");
   }
 
-  // 1. Invalide le cache teacher-scope perso
-  await prisma.user.update({
-    where: { id: session.user.id },
-    data: { lastMoodleSyncAt: null },
-  });
-
   const errors: string[] = [];
+
+  // 1. Re-résout le scope teacher immédiatement (au lieu de simplement
+  //    invalider le cache et laisser le prochain rendu le refaire). Ça
+  //    permet de récupérer la liste des plateformes où le compte Moodle
+  //    n'a pas pu être résolu et de la remonter à l'utilisateur — sinon
+  //    l'échec est totalement silencieux et il voit juste moins de cours.
+  let unresolvedPlatforms: string[] = [];
+  try {
+    unresolvedPlatforms = await refreshTeacherScope(session.user.id);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(`Résolution du scope enseignant : ${msg}`);
+    log.warn({ err: msg }, "refreshMyCoursesFromMoodle : refreshTeacherScope échoué");
+  }
 
   // 2. Importer les nouveaux salons depuis Synapse.
   //    Étape indispensable AVANT le sync des activités : le fuzzy match
@@ -188,6 +199,7 @@ export async function refreshMyCoursesFromMoodle(): Promise<{
     activitiesFound,
     roomsImported,
     roomsLinked,
+    unresolvedPlatforms,
     errors,
   };
 }
