@@ -20,6 +20,10 @@ import {
   userLeaveRoom,
 } from "@/lib/synapse-admin";
 import { enableRagIfCourseIndexable } from "@/lib/moodle-matrix-sync";
+import {
+  resolveCourseFromMarkers,
+  resolveOriginCourse,
+} from "@/lib/room-origin-course";
 import { z } from "zod";
 import { logger } from "@/lib/logger";
 
@@ -113,30 +117,26 @@ export async function syncRoomsFromSynapse(): Promise<{
         { err: e, roomId: r.room_id },
         "getRoomStateSummary échoué — fallback neutre",
       );
-      stateSummary = { moodleCourseId: null, isDirect: false };
+      stateSummary = {
+        moodleCourseId: null,
+        moodleGroupId: null,
+        isDirect: false,
+      };
     }
 
-    // Résolution moodleCourseId (interne DB) à partir du moodleId Moodle.
-    // Si plusieurs cours matchent (multi-plateformes avec même course id),
-    // on tag source=MOODLE sans lier — log warn pour investigation.
+    // Résolution du cours via les marqueurs. Passe d'abord par la table
+    // des activités mod_matrix — seule à porter le `platformId`, donc
+    // seule à pouvoir départager deux plateformes déclarant le même
+    // `moodleId`. Le `group_id` affine quand une activité est déclinée
+    // par groupe (un salon par groupe, tous homonymes).
     let moodleCourseIdDb: string | null = null;
     if (stateSummary.moodleCourseId !== null) {
-      const candidates = await prisma.moodleCourse.findMany({
-        where: { moodleId: stateSummary.moodleCourseId },
-        select: { id: true },
-      });
-      if (candidates.length === 1) {
-        moodleCourseIdDb = candidates[0].id;
-      } else if (candidates.length > 1) {
-        log.warn(
-          {
-            roomId: r.room_id,
-            moodleCourseId: stateSummary.moodleCourseId,
-            candidates: candidates.length,
-          },
-          "Lien MoodleCourse ambigu (même moodleId sur plusieurs plateformes) — source=MOODLE sans lien",
-        );
-      }
+      const resolved = await resolveCourseFromMarkers(
+        stateSummary.moodleCourseId,
+        stateSummary.moodleGroupId,
+        r.room_id,
+      );
+      if (resolved) moodleCourseIdDb = resolved.courseId;
       moodleLinked++;
     }
 
@@ -566,8 +566,16 @@ export async function refreshRoomMoodleLink(roomId: string): Promise<{
     select: { matrixRoomId: true, moodleCourseId: true },
   });
 
-  const summary = await getRoomStateSummary(room.matrixRoomId);
-  if (summary.moodleCourseId === null) {
+  // Même résolution que le sélecteur de /rooms/[id] : lien existant →
+  // activité par matrix_room_id → marqueurs (course_id + group_id)
+  // croisés avec les activités → moodleId seul. On repart de `null` pour
+  // forcer une vraie re-résolution même si un lien est déjà posé.
+  const { hasMoodleMarker, course } = await resolveOriginCourse(
+    room.matrixRoomId,
+    null,
+  );
+
+  if (!hasMoodleMarker) {
     return {
       linked: false,
       courseId: null,
@@ -575,19 +583,13 @@ export async function refreshRoomMoodleLink(roomId: string): Promise<{
       ragAutoEnabled: false,
       indexableResources: 0,
       message:
-        "Ce salon n'a pas de marker Moodle (org.matrix.moodle.course_id) dans son m.room.create — il n'a pas été créé par le plugin mod_matrix.",
+        "Ce salon n'a pas de marqueur Moodle (org.matrix.moodle.course_id) dans son m.room.create — il n'a pas été créé par le plugin mod_matrix.",
     };
   }
 
-  // Résolution du MoodleCourse interne à partir du moodleId Moodle.
-  const candidates = await prisma.moodleCourse.findMany({
-    where: { moodleId: summary.moodleCourseId },
-    select: { id: true, shortname: true },
-  });
-
-  if (candidates.length === 0) {
-    // Marker présent mais pas de MoodleCourse en DB — on tag source=MOODLE
-    // sans lier. L'ADMIN doit d'abord synchroniser le cours côté /moodle.
+  if (!course) {
+    // Marqueur présent mais cours non résolu : on tag quand même
+    // source=MOODLE (l'origine est certaine) sans poser de lien.
     await prisma.room.update({
       where: { id: roomId },
       data: { source: "MOODLE" },
@@ -600,23 +602,15 @@ export async function refreshRoomMoodleLink(roomId: string): Promise<{
       courseShortname: null,
       ragAutoEnabled: false,
       indexableResources: 0,
-      message: `Marker Moodle détecté (course=${summary.moodleCourseId}) mais ce cours n'est pas encore synchronisé dans AI Bot Manager. Lance d'abord la sync côté /moodle.`,
+      message:
+        "Salon d'origine Moodle confirmé, mais son cours n'a pas pu être identifié : soit il n'est pas encore synchronisé dans AI Bot Manager, soit plusieurs plateformes déclarent le même identifiant de cours sans activité Matrix permettant de trancher. Lance la synchronisation des cours puis des activités depuis « Plateformes Moodle ».",
     };
   }
 
-  if (candidates.length > 1) {
-    // Multi-plateformes avec même moodleId — on ne peut pas trancher.
-    return {
-      linked: false,
-      courseId: null,
-      courseShortname: null,
-      ragAutoEnabled: false,
-      indexableResources: 0,
-      message: `Lien ambigu : le moodleId ${summary.moodleCourseId} existe sur ${candidates.length} plateformes différentes. Lien à faire manuellement.`,
-    };
-  }
-
-  const target = candidates[0];
+  const target = await prisma.moodleCourse.findUniqueOrThrow({
+    where: { id: course.courseId },
+    select: { id: true, shortname: true },
+  });
   await prisma.room.update({
     where: { id: roomId },
     data: { source: "MOODLE", moodleCourseId: target.id },

@@ -147,7 +147,7 @@ export default async function RoomDetailPage({
   //    cours indexables (filtre INDEXABLE_MODNAMES + scope ENSEIGNANT).
   //    Sert aux ADMIN qui veulent lier à la main un salon Element à un
   //    cours Moodle.
-  const origin = await resolveOriginCourse(
+  const { hasMoodleMarker, course: origin } = await resolveOriginCourse(
     room.matrixRoomId,
     room.moodleCourseId,
   );
@@ -203,8 +203,17 @@ export default async function RoomDetailPage({
         }
       }
     }
+  } else if (hasMoodleMarker) {
+    // ─── Salon Moodle dont le cours reste indéterminable ────────────
+    // On n'élargit PAS la liste : proposer d'autres cours reviendrait à
+    // inviter un mauvais rattachement. Seul « (aucun) » est offert, avec
+    // l'explication de ce qu'il faut corriger.
+    originCourseNote =
+      "Ce salon provient d'une activité Matrix Moodle, mais son cours d'origine n'a pas pu être identifié — le cours n'est peut-être pas encore synchronisé dans AI Bot Manager, ou plusieurs plateformes déclarent le même identifiant de cours. Lance la synchronisation des cours puis des activités depuis « Plateformes Moodle », ou utilise le bouton « Actualiser » de la carte Administration.";
   } else {
-    // ─── Mode large : fallback pour les salons natifs Matrix ────────
+    // ─── Mode large : uniquement pour les salons natifs Matrix ──────
+    // Aucun marqueur mod_matrix : salon créé dans Element. Un ADMIN peut
+    // vouloir le rattacher manuellement à un cours, on lui laisse le choix.
     const indexableCoursesRaw = await prisma.moodleCourse.findMany({
       where: {
         AND: [

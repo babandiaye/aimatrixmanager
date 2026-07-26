@@ -91,6 +91,16 @@ export function CourseLinker({
   }
 
   if (courses.length === 0) {
+    // `originCourseNote` renseignée = salon Moodle dont le cours d'origine
+    // n'a pas pu être identifié. On explique ce cas précis plutôt que de
+    // servir le message générique « aucun cours indexable ».
+    if (originCourseNote) {
+      return (
+        <p className="rounded-md border border-status-processing/30 bg-status-processing/5 px-3 py-2 text-xs leading-relaxed text-status-processing">
+          {originCourseNote}
+        </p>
+      );
+    }
     return (
       <p className="text-sm text-muted-foreground">
         Aucun cours indexable disponible. Pour qu&apos;un cours apparaisse

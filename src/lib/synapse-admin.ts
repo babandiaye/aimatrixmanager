@@ -417,6 +417,7 @@ export async function listAllRooms(): Promise<SynapseRoom[]> {
  */
 export async function getRoomStateSummary(matrixRoomId: string): Promise<{
   moodleCourseId: number | null;
+  moodleGroupId: number | null;
   isDirect: boolean;
 }> {
   const enc = encodeURIComponent(matrixRoomId);
@@ -429,13 +430,22 @@ export async function getRoomStateSummary(matrixRoomId: string): Promise<{
   const state = data.state ?? [];
 
   const createEvent = state.find((e) => e.type === "m.room.create");
-  const raw = createEvent?.content?.["org.matrix.moodle.course_id"];
-  const moodleCourseId =
-    typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+  const num = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+
+  const moodleCourseId = num(
+    createEvent?.content?.["org.matrix.moodle.course_id"],
+  );
+  // Posé quand l'activité mod_matrix est déclinée par groupe Moodle :
+  // une activité produit alors N salons, un par groupe. Couplé au
+  // course_id, il identifie le salon de façon unique — indispensable
+  // car le fuzzy par nom devient ambigu (tous les salons de groupe
+  // portent le nom de l'activité).
+  const moodleGroupId = num(createEvent?.content?.["org.matrix.moodle.group_id"]);
 
   const isDirect = state.some(
     (e) => e.type === "m.room.member" && e.content?.is_direct === true,
   );
 
-  return { moodleCourseId, isDirect };
+  return { moodleCourseId, moodleGroupId, isDirect };
 }

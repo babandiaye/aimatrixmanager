@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { syncMatrixActivitiesForPlatformCore } from "@/lib/moodle-matrix-sync";
 import { getRoomStateSummary, listAllRooms } from "@/lib/synapse-admin";
+import { resolveCourseFromMarkers } from "@/lib/room-origin-course";
 import { refreshTeacherScope } from "@/lib/teacher-scope";
 import { revalidatePath } from "next/cache";
 
@@ -108,16 +109,24 @@ export async function refreshMyCoursesFromMoodle(): Promise<{
           { err: e, roomId: r.room_id },
           "getRoomStateSummary échoué — fallback neutre",
         );
-        stateSummary = { moodleCourseId: null, isDirect: false };
+        stateSummary = {
+          moodleCourseId: null,
+          moodleGroupId: null,
+          isDirect: false,
+        };
       }
 
+      // Même résolution que syncRoomsFromSynapse : activités mod_matrix
+      // d'abord (portent le platformId → lèvent la collision de moodleId
+      // entre plateformes), affinées par group_id, puis moodleId seul.
       let moodleCourseIdDb: string | null = null;
       if (stateSummary.moodleCourseId !== null) {
-        const candidates = await prisma.moodleCourse.findMany({
-          where: { moodleId: stateSummary.moodleCourseId },
-          select: { id: true },
-        });
-        if (candidates.length === 1) moodleCourseIdDb = candidates[0].id;
+        const resolved = await resolveCourseFromMarkers(
+          stateSummary.moodleCourseId,
+          stateSummary.moodleGroupId,
+          r.room_id,
+        );
+        if (resolved) moodleCourseIdDb = resolved.courseId;
       }
 
       const baseData = {
