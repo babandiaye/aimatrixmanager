@@ -49,7 +49,7 @@ export default async function MatrixActivitiesPage({
   const platform = await prisma.moodlePlatform.findUnique({ where: { id } });
   if (!platform) notFound();
 
-  const canSync = can(session.user.role, "rooms.assign");
+  const canSync = can(session.user.role, "moodle.sync");
 
   const [total, activities] = await Promise.all([
     prisma.moodleMatrixActivity.count({ where: { platformId: id } }),

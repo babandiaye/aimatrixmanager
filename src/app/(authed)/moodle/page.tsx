@@ -29,14 +29,15 @@ import { AcademicCapIcon } from "@heroicons/react/24/outline";
 export default async function MoodlePlatformsPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  // ENSEIGNANT n'a pas accès à la config des plateformes Moodle — il manage
-  // juste ses agents. Redirection silencieuse vers /agents.
-  if (session.user.role === "ENSEIGNANT") redirect("/agents");
   if (!can(session.user.role, "moodle.view")) redirect("/");
 
   const canCreate = can(session.user.role, "moodle.create");
   const canUpdate = can(session.user.role, "moodle.update");
   const canDelete = can(session.user.role, "moodle.delete");
+  // Découplé de `canUpdate` : l'ENSEIGNANT rafraîchit les cours sans pouvoir
+  // toucher à la configuration de la plateforme.
+  const canSync = can(session.user.role, "moodle.sync");
+  const canTest = can(session.user.role, "moodle.test");
 
   const platforms = await prisma.moodlePlatform.findMany({
     orderBy: { createdAt: "asc" },
@@ -140,12 +141,13 @@ export default async function MoodlePlatformsPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="inline-flex items-center gap-2">
-                        <TestPlatformButton platformId={p.id} />
+                        {canTest && <TestPlatformButton platformId={p.id} />}
                         <PlatformActions
                           id={p.id}
                           enabled={p.enabled}
                           canUpdate={canUpdate}
                           canDelete={canDelete}
+                          canSync={canSync}
                         />
                       </div>
                     </TableCell>

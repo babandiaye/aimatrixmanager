@@ -20,63 +20,69 @@ export function PlatformActions({
   enabled,
   canUpdate,
   canDelete,
+  canSync,
 }: {
   id: string;
   enabled: boolean;
   canUpdate: boolean;
   canDelete: boolean;
+  /** Rafraîchir les cours depuis Moodle — accordé aussi à l'ENSEIGNANT,
+   *  d'où la séparation d'avec `canUpdate` qui reste réservé aux admins. */
+  canSync: boolean;
 }) {
   const [pending, start] = useTransition();
 
   return (
     <div className="flex items-center justify-end gap-2">
       {canUpdate && (
-        <>
-          <Switch
-            checked={enabled}
-            disabled={pending}
-            title={enabled ? "Désactiver" : "Activer"}
-            onCheckedChange={(next) => {
-              start(async () => {
-                try {
-                  await togglePlatformEnabled(id, next);
-                } catch (e) {
-                  alert(e instanceof Error ? e.message : "Erreur");
-                }
-              });
-            }}
+        <Switch
+          checked={enabled}
+          disabled={pending}
+          title={enabled ? "Désactiver" : "Activer"}
+          onCheckedChange={(next) => {
+            start(async () => {
+              try {
+                await togglePlatformEnabled(id, next);
+              } catch (e) {
+                alert(e instanceof Error ? e.message : "Erreur");
+              }
+            });
+          }}
+        />
+      )}
+      {canSync && (
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          disabled={pending || !enabled}
+          title="Synchroniser les cours"
+          onClick={() => {
+            start(async () => {
+              try {
+                const r = await syncCoursesForPlatform(id);
+                alert(
+                  `Sync OK : ${r.total} cours (${r.inserted} créés, ${r.updated} mis à jour)`,
+                );
+              } catch (e) {
+                alert(e instanceof Error ? e.message : "Erreur");
+              }
+            });
+          }}
+        >
+          <ArrowPathIcon
+            className={`size-4 ${pending ? "animate-spin" : ""}`}
           />
-          <Button
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            disabled={pending || !enabled}
-            title="Synchroniser les cours"
-            onClick={() => {
-              start(async () => {
-                try {
-                  const r = await syncCoursesForPlatform(id);
-                  alert(
-                    `Sync OK : ${r.total} cours (${r.inserted} créés, ${r.updated} mis à jour)`,
-                  );
-                } catch (e) {
-                  alert(e instanceof Error ? e.message : "Erreur");
-                }
-              });
-            }}
-          >
-            <ArrowPathIcon
-              className={`size-4 ${pending ? "animate-spin" : ""}`}
-            />
-          </Button>
-          <Link
-            href={`/moodle/${id}/edit`}
-            className={buttonVariants({ variant: "outline", size: "icon-sm" })}
-            title="Modifier"
-          >
-            <PencilSquareIcon className="size-4" />
-          </Link>
-        </>
+        </Button>
+      )}
+      {canUpdate && (
+        <Link
+          href={`/moodle/${id}/edit`}
+          className={buttonVariants({ variant: "outline", size: "icon-sm" })}
+          title="Modifier"
+        >
+          <PencilSquareIcon className="size-4" />
+        </Link>
       )}
       {canDelete && (
         <Button

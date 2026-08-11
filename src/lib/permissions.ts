@@ -8,11 +8,20 @@ export type Permission =
   // Plateforme / config système
   | "users.manage"
   | "settings.manage"
-  // Plateformes Moodle (CRUD = ADMIN seul, view = MANAGER/AUDITOR)
+  // Plateformes Moodle (CRUD = ADMIN seul, view = MANAGER/AUDITOR/ENSEIGNANT)
   | "moodle.create"
   | "moodle.update"
   | "moodle.delete"
   | "moodle.view"
+  // Rapatriement depuis Moodle (cours, activités Matrix). Séparé de
+  // `moodle.update` : ça n'écrit rien côté Moodle et ne touche pas à la
+  // config de la plateforme, ça ne fait que rafraîchir notre copie locale.
+  // L'ENSEIGNANT en a besoin pour voir ses nouveaux cours sans dépendre
+  // d'un admin.
+  | "moodle.sync"
+  // Diagnostic de connexion (« Tester »). Révèle le compte de service
+  // Moodle et la version du site → outil d'exploitation, pas d'enseignant.
+  | "moodle.test"
   // Agents IA — portée globale ou propriétaire (ENSEIGNANT)
   | "agents.create"
   | "agents.update"
@@ -31,15 +40,21 @@ export type Permission =
   | "audit.delete";
 
 const MANAGER_PERMS: ReadonlySet<Permission> = new Set([
-  "moodle.view",
+  "moodle.view", "moodle.sync", "moodle.test",
   "agents.create", "agents.update", "agents.delete", "agents.view",
   "rooms.assign", "rooms.view",
   "audit.view",
 ]);
 
 // ENSEIGNANT : peut créer ses propres agents et les affecter à ses cours.
-// Pas d'accès aux plateformes Moodle (config admin), pas aux autres users.
+// Voit les plateformes Moodle en lecture seule et peut lancer une sync
+// (cours + activités Matrix) pour que ses nouveaux cours remontent sans
+// intervention d'un admin. Ne peut ni créer, ni modifier, ni supprimer une
+// plateforme — le wsToken reste hors de portée, /moodle/[id]/edit étant
+// gardé par `moodle.update`.
 const ENSEIGNANT_PERMS: ReadonlySet<Permission> = new Set([
+  "moodle.view",
+  "moodle.sync",
   "agents.create",
   "agents.update-own",
   "agents.delete-own",
@@ -48,8 +63,10 @@ const ENSEIGNANT_PERMS: ReadonlySet<Permission> = new Set([
   "rooms.view-own",
 ]);
 
+// AUDITOR : lecture seule stricte — pas de sync, qui écrit en base.
 const AUDITOR_PERMS: ReadonlySet<Permission> = new Set([
   "moodle.view",
+  "moodle.test",
   "agents.view",
   "rooms.view",
   "audit.view",

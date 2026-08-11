@@ -207,7 +207,7 @@ export async function testMoodlePlatform(platformId: string): Promise<{
 }> {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "moodle.view");
+  assertCan(session.user.role, "moodle.test");
 
   const platform = await prisma.moodlePlatform.findUniqueOrThrow({
     where: { id: platformId },
@@ -414,9 +414,11 @@ export async function syncCoursesForPlatform(platformId: string): Promise<{
 }> {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  // Lecture seule pour Manager/Auditor sur Moodle, mais sync est une action
-  // de maintenance — autorisons rooms.assign (Admin/Manager).
-  assertCan(session.user.role, "rooms.assign");
+  // Rapatriement en lecture depuis Moodle : n'écrit rien côté Moodle et ne
+  // touche pas à la config de la plateforme. Ouvert à l'ENSEIGNANT, qui en a
+  // besoin pour faire remonter ses propres cours (le filtrage par périmètre
+  // reste assuré en aval par teacher-scope).
+  assertCan(session.user.role, "moodle.sync");
 
   const platform = await prisma.moodlePlatform.findUniqueOrThrow({
     where: { id: platformId },
@@ -485,7 +487,7 @@ export async function syncMatrixActivitiesForPlatform(
 }> {
   const session = await auth();
   if (!session?.user) throw new Error("Unauthorized");
-  assertCan(session.user.role, "rooms.assign");
+  assertCan(session.user.role, "moodle.sync");
   return syncMatrixActivitiesForPlatformCore(platformId);
 }
 
