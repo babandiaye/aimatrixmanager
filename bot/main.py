@@ -81,6 +81,45 @@ log = logging.getLogger("aibotmanager")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Erreurs LLM — journal et message utilisateur
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Exceptions dont `str()` est VIDE. Les journaliser avec `{e}` produit une
+# ligne muette : « Streaming LLM (OLLAMA) : » et rien derrière. Toujours
+# préfixer par le type — c'est ce qui manquait pour diagnostiquer les
+# timeouts Ollama du 11/08.
+_TIMEOUT_EXC = (
+    httpx.ReadTimeout,
+    httpx.ConnectTimeout,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
+    asyncio.TimeoutError,
+)
+
+
+def describe_exc(exc: BaseException) -> str:
+    """Représentation journalisable, jamais vide."""
+    detail = str(exc).strip()
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def user_facing_llm_error(exc: BaseException) -> str:
+    """Message destiné à l'étudiant, pas à l'exploitant.
+
+    Un timeout côté Ollama veut presque toujours dire que le modèle n'est
+    plus résident en VRAM et se recharge — mesuré à ~45 s à froid contre
+    <1 s à chaud. Le dire évite que l'utilisateur conclue que le bot est
+    cassé : il lui suffit de reposer sa question.
+    """
+    if isinstance(exc, _TIMEOUT_EXC):
+        return (
+            "⏳ Le modèle est en train de démarrer, cela peut prendre une "
+            "minute. Repose-moi ta question."
+        )
+    return "❌ Désolé, je rencontre un problème technique."
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # AgentRunner — un par agent
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -94,6 +133,11 @@ class AgentRunner:
         # Historique court par room (clé = matrix_room_id)
         self.history: dict[str, list] = {}
         self.log = log.getChild(self.row.slug)
+        # Tâches de fond (keys_loop, heartbeat_loop). Elles sont créées par
+        # `run()` avec `create_task` : ce sont des tasks INDÉPENDANTES, que
+        # l'annulation de `run()` ne touche pas. Sans cette liste, elles
+        # survivent à l'arrêt du runner — cf. `shutdown()`.
+        self._bg_tasks: list[asyncio.Task] = []
 
     async def whoami(self, access_token: str) -> Optional[str]:
         """Récupère le device_id si on ne l'a pas en DB (premier démarrage d'un agent récent)."""
@@ -530,10 +574,12 @@ class AgentRunner:
                         last_edit_t = now
                         last_edit_len = len(buffer)
         except Exception as e:
-            self.log.error(f"Streaming LLM ({self.row.provider}) : {e}")
+            self.log.error(
+                f"Streaming LLM ({self.row.provider}) : {describe_exc(e)}"
+            )
             # Fallback : édit avec un message d'erreur si on n'a rien streamé
             if not buffer:
-                buffer = "❌ Désolé, je rencontre un problème technique."
+                buffer = user_facing_llm_error(e)
         finally:
             # Coupe l'animation « pulse » (au cas où aucun token n'est arrivé,
             # ex: erreur LLM avant le premier chunk).
@@ -619,8 +665,11 @@ class AgentRunner:
                 rag_enabled=rag_enabled,
             )
         except Exception as e:
-            err = str(e)
-            answer = "❌ Désolé, je rencontre un problème technique."
+            # `str(e)` seul serait vide sur un timeout httpx — l'audit
+            # enregistrerait une erreur sans cause. Cf. describe_exc().
+            err = describe_exc(e)
+            self.log.error(f"ask_llm_streaming : {err}")
+            answer = user_facing_llm_error(e)
             await self.send(room.room_id, answer)
         latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -940,13 +989,42 @@ class AgentRunner:
         # et on rattrape les divergences via `_attempt_rejoin`.
         await self._reconcile_membership_at_boot()
 
-        asyncio.create_task(self.keys_loop())
-        asyncio.create_task(self.heartbeat_loop())
+        self._bg_tasks = [
+            asyncio.create_task(self.keys_loop(), name=f"{self.row.slug}:keys"),
+            asyncio.create_task(
+                self.heartbeat_loop(), name=f"{self.row.slug}:heartbeat"
+            ),
+        ]
         self.log.info(f"🚀 {self.row.slug} prêt")
         try:
             await self.client.sync_forever(timeout=30000, full_state=True)
         finally:
-            await self.client.close()
+            await self.shutdown()
+
+    async def shutdown(self) -> None:
+        """Annule les tâches de fond puis ferme la session Matrix.
+
+        Idempotent : appelable depuis `run()` (fin normale) comme depuis
+        `_stop_runner` (arrêt externe).
+
+        POURQUOI — `keys_loop` et `heartbeat_loop` sont des tasks créées avec
+        `create_task` : annuler `run()` ne les annule pas. Un runner arrêté
+        (agent désactivé, rotation de jeton) laissait donc derrière lui :
+          • `keys_loop`, qui interrogeait Synapse toutes les 5 min avec un
+            jeton révoqué — 401 en boucle, sans fin ;
+          • `heartbeat_loop`, qui continuait d'écrire `lastHeartbeatAt` et
+            faisait passer un agent mort pour vivant dans le dashboard.
+        """
+        for t in self._bg_tasks:
+            t.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+            self._bg_tasks = []
+        if self.client:
+            try:
+                await self.client.close()
+            except Exception as e:
+                self.log.warning(f"close(): {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -965,11 +1043,13 @@ async def _stop_runner(runner: "AgentRunner", task: asyncio.Task) -> None:
             pass
         except Exception:
             pass
-    if runner.client:
-        try:
-            await runner.client.close()
-        except Exception:
-            pass
+    # Toujours appeler shutdown() explicitement : le `finally` de `run()` ne
+    # s'exécute pas si la task était déjà terminée (crash), et une annulation
+    # peut l'interrompre avant qu'il n'ait fini. `shutdown()` est idempotent.
+    try:
+        await runner.shutdown()
+    except Exception as e:
+        log.warning(f"shutdown {runner.row.slug} : {e}")
 
 
 # Champs hot-reloadables sans relancer la session Matrix (juste swap row).
@@ -1014,6 +1094,10 @@ async def reconcile_runners(
             log.warning(
                 f"Runner {runner.row.slug} a terminé inopinément, retiré du pool"
             )
+            # Le crash de `run()` ne dit rien des tâches de fond : elles
+            # tournent toujours. Sans ce nettoyage, l'étape 3 redémarre un
+            # runner pour le même agent et les deux coexistent.
+            await _stop_runner(runner, task)
             del runners[aid]
 
     # 2. Stopper les runners dont l'agent n'est plus ENABLED

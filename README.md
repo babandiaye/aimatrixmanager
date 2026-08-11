@@ -237,6 +237,27 @@ Le bot embarque une **reconcile loop** ([bot/main.py](bot/main.py)) qui re-scann
 
 Chaque agent envoie aussi un **heartbeat** dans `Agent.lastHeartbeatAt` (sert au check « Bot multi-agents » du dashboard `/health`).
 
+#### Arrêt d'un runner — pourquoi `shutdown()` existe
+
+`run()` lance `keys_loop` et `heartbeat_loop` via `asyncio.create_task` : ce sont des tâches **indépendantes**, qu'annuler `run()` ne touche pas. Tout arrêt de runner passe donc par `AgentRunner.shutdown()`, qui les annule avant de fermer la session Matrix.
+
+Sans ça, un runner arrêté (agent `DISABLED`, rotation de token, crash) laissait derrière lui deux boucles zombies :
+
+| Boucle survivante | Symptôme observable |
+|---|---|
+| `keys_loop` | `POST /keys/query → 401` toutes les 5 min dans les logs Synapse, indéfiniment (jeton révoqué) |
+| `heartbeat_loop` | `Agent.lastHeartbeatAt` continuait d'être écrit — **un agent mort s'affichait vivant** sur `/health` |
+
+Le chemin « runner terminé inopinément » de la reconcile loop appelle lui aussi `_stop_runner` : un crash de `run()` ne dit rien de ses tâches filles, qui tournent toujours.
+
+Signe qu'une régression est réapparue — après une rotation de token, chercher :
+
+```bash
+sudo grep "Invalid access token passed" /var/log/matrix-synapse/homeserver.log | grep keys/query
+```
+
+Toute occurrence postérieure à un `🔄 Restart runner` est un orphelin.
+
 Un redémarrage manuel (`sudo docker restart bot-ia`) n'est nécessaire qu'après une modif du **code Python** :
 
 ```bash
@@ -524,15 +545,43 @@ La réponse de `mod_matrix_get_matrices_by_courses` expose par ailleurs `wwwroot
 - Réintégration : `POST /_synapse/admin/v1/join/{roomId}` avec le `user_id` du bot (`src/lib/synapse-admin.ts::joinUserToRoom`).
 - Le reconcile loop **ne re-rejoint pas tout seul** un bot kické (par sécurité — on ne veut pas qu'un bot s'incruste après éviction).
 
-### Bot répond `❌ Désolé, je rencontre un problème technique`
-- Cause typique : Ollama renvoie une 5xx (modèle KO chargé, OOM GPU, fromager dégradé).
-- Vérifier le dashboard `/health` → carte « Ollama (fromager) » : `warn` ou `error` = problème côté serveur d'inférence.
-- Tester directement :
-  ```bash
-  curl -sH "Authorization: Bearer $OLLAMA_API_KEY" \
-       "$OLLAMA_BASE_URL/v1/models" | jq '.data | length'
-  ```
-- Solution temporaire : faire pointer l'agent sur un autre modèle (`/agents/[id]/edit`) ou un autre provider.
+### Bot répond `⏳ Le modèle est en train de démarrer` (timeout Ollama)
+
+**Le cas le plus fréquent.** Le message est spécifique aux timeouts — un vrai plantage renvoie `❌ Désolé, je rencontre un problème technique`.
+
+Signature dans les logs : exactement **120 s** entre la question et l'erreur (la valeur de `httpx.AsyncClient(timeout=120)` dans [bot/llm.py](bot/llm.py)).
+
+```
+16:09:38  @user → !room [GROUP] : résous l'équation …
+16:11:38  Streaming LLM (OLLAMA) : ReadTimeout
+```
+
+**Cause** — le modèle n'est plus résident en VRAM sur `fromager` et se recharge. Mesuré le 11/08/2026 :
+
+| | Premier jeton |
+|---|---:|
+| Modèle absent de la mémoire | **43,8 s** |
+| Requête suivante, modèle chaud | **0,5 s** |
+
+Ce n'est **pas** une expiration de `keep_alive` (réglé à 24 h) mais une **éviction** : les six modèles de `fromager` se disputent la même carte.
+
+```bash
+# Qui est résident, et pour combien de VRAM ?
+curl -sH "Authorization: Bearer $OLLAMA_API_KEY" "$OLLAMA_BASE_URL/api/ps" | jq \
+  '.models[] | {name, size_vram, context_length, expires_at}'
+```
+
+L'anomalie à surveiller : `gemma3:12b` pèse 8,1 Go sur disque mais occupe **48,8 Go en VRAM**, parce que son `context_length` vaut `131072`. Les agents plafonnent à `maxTokens=2048` — cette fenêtre ne sert à rien et empêche tout autre modèle de coexister.
+
+- **Correctif durable** (côté `fromager`, hors de ce repo) : réduire `num_ctx` de `gemma3:12b` à 8 K–16 K, ou fixer `OLLAMA_MAX_LOADED_MODELS`.
+- **Contournement immédiat** : pointer l'agent sur un autre modèle (`/agents/[id]/edit`).
+- Le dashboard `/health` → carte « Ollama (fromager) » ne détecte **pas** ce cas : `/v1/models` répond en 0,08 s même quand le modèle est déchargé.
+
+### Une erreur LLM apparaît sans cause dans les logs ou dans `AuditLog`
+
+Ne doit plus arriver. `str()` est **vide** sur plusieurs exceptions `httpx` (`ReadTimeout`, `ConnectTimeout`…), ce qui produisait la ligne muette `Streaming LLM (OLLAMA) : ` et un champ `AuditLog.error` sans contenu.
+
+Tout report d'erreur LLM passe désormais par `describe_exc()` ([bot/main.py](bot/main.py)), qui préfixe systématiquement par le type. Si une ligne d'erreur réapparaît sans cause, c'est qu'un chemin a contourné ce helper.
 
 ### Indexation RAG bloquée à 0% / barre infinie sur `/rooms/[id]`
 - Vérifier l'état du worker BullMQ dans Redis :
