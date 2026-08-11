@@ -32,6 +32,12 @@ import {
 import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
 import { PageHeader } from "@/components/ui/page-header";
 import { AgentRowActions } from "./row-actions";
+import {
+  AgentBulkBar,
+  AgentRowCheckbox,
+  AgentSelectAllCheckbox,
+  AgentSelectionProvider,
+} from "./selection";
 
 const PAGE_SIZE = 10;
 
@@ -113,9 +119,18 @@ export default async function AgentsPage({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <AgentSelectionProvider>
+            {(canUpdate || canDelete) && (
+              <AgentBulkBar canUpdate={canUpdate} canDelete={canDelete} />
+            )}
             <Table>
               <TableHeader>
                 <TableRow>
+                  {(canUpdate || canDelete) && (
+                    <TableHead className="w-8">
+                      <AgentSelectAllCheckbox ids={agents.map((a) => a.id)} />
+                    </TableHead>
+                  )}
                   <TableHead>Slug</TableHead>
                   <TableHead>Nom</TableHead>
                   <TableHead>Modèle</TableHead>
@@ -135,6 +150,11 @@ export default async function AgentsPage({
                       : "partial";
                   return (
                     <TableRow key={a.id}>
+                      {(canUpdate || canDelete) && (
+                        <TableCell className="w-8">
+                          <AgentRowCheckbox id={a.id} label={a.slug} />
+                        </TableCell>
+                      )}
                       <TableCell className="font-mono text-xs">
                         <Link
                           href={`/agents/${a.id}`}
@@ -228,6 +248,7 @@ export default async function AgentsPage({
                 })}
               </TableBody>
             </Table>
+            </AgentSelectionProvider>
 
             <Pagination
               page={page}

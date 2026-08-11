@@ -468,3 +468,120 @@ export async function signAgentDeviceAction(
   revalidatePath("/agents");
   return { ok: true };
 }
+
+// ─── Actions groupées ───────────────────────────────────────────────────────
+//
+// Le résultat est partiel par conception : un agent en échec (droits
+// insuffisants, compte Matrix récalcitrant) ne doit pas annuler le
+// traitement des autres. On renvoie le détail pour que l'UI puisse
+// nommer précisément ce qui a échoué.
+
+/** Garde-fou : au-delà, c'est un usage anormal de l'UI. */
+const BULK_MAX = 100;
+
+export type BulkResult = {
+  ok: number;
+  failed: Array<{ id: string; label: string; error: string }>;
+};
+
+function assertBulkInput(ids: string[]): void {
+  if (ids.length === 0) throw new Error("Aucun agent sélectionné");
+  if (ids.length > BULK_MAX) {
+    throw new Error(`Trop d'agents sélectionnés (max ${BULK_MAX})`);
+  }
+}
+
+/**
+ * Change le statut de plusieurs agents. L'ownership est revérifié agent
+ * par agent — un ENSEIGNANT ne peut agir que sur les siens, même si
+ * l'interface lui en proposait d'autres.
+ */
+export async function bulkSetAgentStatus(
+  ids: string[],
+  status: "ENABLED" | "DISABLED" | "SUSPENDED",
+): Promise<BulkResult> {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertBulkInput(ids);
+
+  const result: BulkResult = { ok: 0, failed: [] };
+
+  for (const id of ids) {
+    try {
+      await assertAgentEditable(session.user.role, session.user.id, id, "update");
+      await prisma.agent.update({ where: { id }, data: { status } });
+      result.ok++;
+    } catch (e) {
+      const agent = await prisma.agent.findUnique({
+        where: { id },
+        select: { slug: true },
+      });
+      result.failed.push({
+        id,
+        label: agent?.slug ?? id,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  log.info(
+    { status, requested: ids.length, ok: result.ok, failed: result.failed.length },
+    "Changement de statut groupé",
+  );
+  revalidatePath("/agents");
+  return result;
+}
+
+/**
+ * Supprime plusieurs agents : désactivation du compte Matrix puis
+ * suppression en base (cascade sur les affectations).
+ *
+ * Comme pour la suppression unitaire, un échec de désactivation Matrix
+ * empêche la suppression en base — mieux vaut un agent encore listé
+ * qu'un compte Matrix orphelin, invisible depuis l'application.
+ */
+export async function bulkDeleteAgents(ids: string[]): Promise<BulkResult> {
+  const session = await auth();
+  if (!session?.user) throw new Error("Unauthorized");
+  assertBulkInput(ids);
+
+  const result: BulkResult = { ok: 0, failed: [] };
+
+  for (const id of ids) {
+    let slug = id;
+    try {
+      await assertAgentEditable(session.user.role, session.user.id, id, "delete");
+      const agent = await prisma.agent.findUniqueOrThrow({
+        where: { id },
+        select: { slug: true, matrixUserId: true },
+      });
+      slug = agent.slug;
+
+      try {
+        await deactivateUser(agent.slug);
+      } catch (e) {
+        // M_NOT_FOUND : le compte Matrix n'existe déjà plus, on continue.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!/M_NOT_FOUND/i.test(msg)) throw e;
+        log.info({ slug: agent.slug }, "Compte Matrix déjà absent, on continue");
+      }
+
+      await prisma.agent.delete({ where: { id } });
+      log.info({ slug: agent.slug }, "Agent supprimé (action groupée)");
+      result.ok++;
+    } catch (e) {
+      result.failed.push({
+        id,
+        label: slug,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  log.info(
+    { requested: ids.length, ok: result.ok, failed: result.failed.length },
+    "Suppression groupée",
+  );
+  revalidatePath("/agents");
+  return result;
+}
