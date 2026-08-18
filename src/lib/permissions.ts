@@ -37,13 +37,21 @@ export type Permission =
   | "rooms.view-own"
   // Audit
   | "audit.view"
-  | "audit.delete";
+  | "audit.delete"
+  // Configurations LLM.
+  //   `.own`    : déclarer SA clé Anthropic/OpenAI. Ouvert à tous les rôles
+  //               qui créent des agents — c'est leur clé, leur facture.
+  //   `.shared` : gérer le catalogue commun (Ollama UN-CHK), donc le défaut
+  //               d'usine servi à toute la plateforme. ADMIN seul.
+  | "llm.manage-own"
+  | "llm.manage-shared";
 
 const MANAGER_PERMS: ReadonlySet<Permission> = new Set([
   "moodle.view", "moodle.sync", "moodle.test",
   "agents.create", "agents.update", "agents.delete", "agents.view",
   "rooms.assign", "rooms.view",
   "audit.view",
+  "llm.manage-own",
 ]);
 
 // ENSEIGNANT : peut créer ses propres agents et les affecter à ses cours.
@@ -61,6 +69,7 @@ const ENSEIGNANT_PERMS: ReadonlySet<Permission> = new Set([
   "agents.view-own",
   "rooms.assign-own",
   "rooms.view-own",
+  "llm.manage-own",
 ]);
 
 // AUDITOR : lecture seule stricte — pas de sync, qui écrit en base.

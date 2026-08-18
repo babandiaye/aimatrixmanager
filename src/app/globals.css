@@ -28,6 +28,12 @@
   --color-status-unpublished: #d97706;
   --color-status-processing: #9333ea;
   --color-status-error: #dc2626;
+
+  /* Statuts génériques. Étaient référencés par `text-status-ok` et
+     `text-status-warn` dans quatre composants sans jamais avoir été
+     définis — le texte s'affichait donc sans couleur. */
+  --color-status-ok: #16a34a;
+  --color-status-warn: #d97706;
 }
 
 /* ─── Tokens sémantiques (référencent :root pour le dark mode) ─────────── */

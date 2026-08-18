@@ -7,6 +7,7 @@ import { canAny, type Permission } from "@/lib/permissions";
 import type { UserRole } from "@prisma/client";
 import {
   ChartBarIcon,
+  KeyIcon,
   CpuChipIcon,
   ChatBubbleLeftRightIcon,
   AcademicCapIcon,
@@ -38,6 +39,12 @@ const NAV: NavItem[] = [
     label: "Agents",
     icon: CpuChipIcon,
     requiresAny: ["agents.view", "agents.view-own"],
+  },
+  {
+    href: "/llm",
+    label: "Mes fournisseurs IA",
+    icon: KeyIcon,
+    requiresAny: ["llm.manage-own"],
   },
   {
     href: "/rooms",
