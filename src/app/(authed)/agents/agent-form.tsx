@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { type AgentFormState, createAgent, updateAgent } from "./actions";
 import { SHARED_OLLAMA_MODEL } from "@/lib/llm-catalog";
+import type { LLMProvider } from "@prisma/client";
 
 type Initial = {
   id?: string;
@@ -14,7 +15,10 @@ type Initial = {
   name?: string;
   description?: string | null;
   systemPrompt?: string;
-  provider?: "ANTHROPIC" | "OLLAMA";
+  // Type Prisma plutôt qu'une union figée : l'enum gagne des valeurs
+  // (OPENAI) au fil des phases, et le formulaire reçoit ce que la base
+  // contient — y compris pour des agents créés avant la restriction.
+  provider?: LLMProvider;
   model?: string;
   maxTokens?: number;
   temperature?: number | null;
