@@ -1,18 +1,12 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState } from "react";
 import Link from "next/link";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { type AgentFormState, createAgent, updateAgent } from "./actions";
+import { SHARED_OLLAMA_MODEL } from "@/lib/llm-catalog";
 
 type Initial = {
   id?: string;
@@ -25,12 +19,6 @@ type Initial = {
   maxTokens?: number;
   temperature?: number | null;
 };
-
-const ANTHROPIC_MODELS = [
-  { value: "claude-opus-4-7", label: "Claude Opus 4.7 (le + capable, US)" },
-  { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (équilibré, US)" },
-  { value: "claude-haiku-4-5", label: "Claude Haiku 4.5 (rapide & éco, US)" },
-];
 
 export function AgentForm({
   initial,
@@ -54,25 +42,12 @@ export function AgentForm({
   >(action, undefined);
   const errs = state?.fieldErrors ?? {};
 
-  const [provider, setProvider] = useState<"ANTHROPIC" | "OLLAMA">(
-    initial?.provider ?? "ANTHROPIC",
+  // Le fournisseur et le modèle ne sont plus choisis : il n'y en a qu'un.
+  // On vérifie seulement que le serveur l'expose réellement — le catalogue
+  // dit ce qui est AUTORISÉ, cette liste dit ce qui EXISTE.
+  const modelAvailable = ollamaModels.some(
+    (m) => m.name === SHARED_OLLAMA_MODEL,
   );
-
-  // Modèle initial : on prend celui en cours si présent, sinon défaut du provider
-  const defaultAnthropicModel =
-    initial?.provider === "ANTHROPIC" && initial?.model
-      ? initial.model
-      : "claude-sonnet-4-6";
-  const defaultOllamaModel =
-    initial?.provider === "OLLAMA" && initial?.model
-      ? initial.model
-      : (ollamaModels[0]?.name ?? "");
-
-  const [anthropicModel, setAnthropicModel] = useState(defaultAnthropicModel);
-  const [ollamaModel, setOllamaModel] = useState(defaultOllamaModel);
-
-  const fmtSize = (n: number) =>
-    n < 1e9 ? `${(n / 1e6).toFixed(0)} MB` : `${(n / 1e9).toFixed(1)} GB`;
 
   return (
     <form action={formAction} className="space-y-5">
@@ -160,112 +135,36 @@ export function AgentForm({
         )}
       </div>
 
-      {/* Choix Provider */}
+      {/* Fournisseur — un seul disponible.
+          Anthropic et OpenAI reviendront adossés à la clé personnelle de
+          l'enseignant. Les proposer aujourd'hui ferait consommer la clé
+          de l'établissement, sans rattachement ni plafond. */}
       <div className="space-y-2">
         <Label>Fournisseur LLM</Label>
-        <div className="grid gap-2 md:grid-cols-2">
-          <label
-            className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-              provider === "ANTHROPIC"
-                ? "border-primary bg-secondary"
-                : "border-border hover:bg-muted/50"
-            }`}
-          >
-            <input
-              type="radio"
-              name="provider"
-              value="ANTHROPIC"
-              checked={provider === "ANTHROPIC"}
-              onChange={() => setProvider("ANTHROPIC")}
-              className="mt-1"
-            />
-            <div>
-              <div className="text-sm font-medium">Anthropic Claude</div>
-              <div className="text-xs text-muted-foreground">
-                API US, qualité top tier (Opus / Sonnet / Haiku). Coût par token.
-              </div>
-            </div>
-          </label>
-          <label
-            className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-              !ollamaEnabled
-                ? "opacity-50 cursor-not-allowed"
-                : provider === "OLLAMA"
-                  ? "border-primary bg-secondary"
-                  : "border-border hover:bg-muted/50"
-            }`}
-          >
-            <input
-              type="radio"
-              name="provider"
-              value="OLLAMA"
-              checked={provider === "OLLAMA"}
-              onChange={() => setProvider("OLLAMA")}
-              disabled={!ollamaEnabled}
-              className="mt-1"
-            />
-            <div>
-              <div className="text-sm font-medium">Ollama souverain</div>
-              <div className="text-xs text-muted-foreground">
-                {ollamaEnabled
-                  ? `${ollamaModels.length} modèle(s) on-prem (UN-CHK). Privacy + zéro coût/token.`
-                  : "Non configuré (OLLAMA_BASE_URL/API_KEY manquants)"}
-              </div>
-            </div>
-          </label>
+        <div className="rounded-lg border border-border p-3">
+          <div className="text-sm font-medium">
+            Ollama UN-CHK —{" "}
+            <span className="font-mono">{SHARED_OLLAMA_MODEL}</span>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {!ollamaEnabled
+              ? "Non configuré — OLLAMA_BASE_URL et OLLAMA_API_KEY absentes du .env."
+              : modelAvailable
+                ? "Hébergé à l'UN-CHK. Aucune donnée ne quitte l'établissement, aucun coût par jeton."
+                : `Le serveur répond mais n'expose pas ${SHARED_OLLAMA_MODEL} — l'agent ne pourra pas répondre.`}
+          </div>
         </div>
+        <input type="hidden" name="provider" value="OLLAMA" />
+        <input type="hidden" name="model" value={SHARED_OLLAMA_MODEL} />
+        {errs.provider?.[0] && (
+          <p className="text-xs text-destructive">{errs.provider[0]}</p>
+        )}
+        {errs.model?.[0] && (
+          <p className="text-xs text-destructive">{errs.model[0]}</p>
+        )}
       </div>
 
-      {/* Modèle dynamique selon provider — un seul `name="model"` actif à la fois */}
       <div className="grid gap-5 md:grid-cols-3">
-        <div className="space-y-2 md:col-span-2">
-          <Label htmlFor="model">Modèle</Label>
-          {provider === "ANTHROPIC" ? (
-            <>
-              <Select
-                name="model"
-                value={anthropicModel}
-                onValueChange={(v) => v && setAnthropicModel(v)}
-              >
-                <SelectTrigger id="model" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {ANTHROPIC_MODELS.map((m) => (
-                    <SelectItem key={m.value} value={m.value}>
-                      {m.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </>
-          ) : (
-            <>
-              <Select
-                name="model"
-                value={ollamaModel}
-                onValueChange={(v) => v && setOllamaModel(v)}
-              >
-                <SelectTrigger id="model" className="w-full">
-                  <SelectValue placeholder="Choisir un modèle..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {ollamaModels.map((m) => (
-                    <SelectItem key={m.name} value={m.name}>
-                      {m.name}
-                      {m.parameter_size && ` — ${m.parameter_size}`} (
-                      {fmtSize(m.size)})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </>
-          )}
-          {errs.model?.[0] && (
-            <p className="text-xs text-destructive">{errs.model[0]}</p>
-          )}
-        </div>
-
         <div className="space-y-2">
           <Label htmlFor="maxTokens">Max tokens</Label>
           <Input

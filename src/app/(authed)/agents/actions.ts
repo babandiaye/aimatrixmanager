@@ -7,6 +7,12 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertCan, can, canAny } from "@/lib/permissions";
+import {
+  isModelAllowed,
+  isProviderSelectable,
+  modelErrorFor,
+  providerErrorFor,
+} from "@/lib/llm-catalog";
 import { decrypt, encrypt } from "@/lib/crypto";
 import {
   buildMxid,
@@ -52,12 +58,6 @@ async function assertAgentEditable(
 
 const slugRe = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
-const ANTHROPIC_MODELS = [
-  "claude-opus-4-7",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
-] as const;
-
 // Schéma base (objet pur — autorise .omit() / .pick() / .extend())
 const baseSchemaObject = z.object({
   slug: z
@@ -88,19 +88,29 @@ const baseSchemaObject = z.object({
 
 // Refine appliqué à part — couvre create et update (model valide pour le provider)
 function refineProviderModel<T extends z.ZodObject>(schema: T) {
-  return schema.refine(
-    (data: unknown) => {
-      const d = data as { provider: string; model: string };
-      return (
-        d.provider !== "ANTHROPIC" ||
-        (ANTHROPIC_MODELS as readonly string[]).includes(d.model)
-      );
-    },
-    {
-      path: ["model"],
-      message: "Modèle Anthropic invalide",
-    },
-  );
+  return schema.superRefine((data: unknown, ctx) => {
+    const d = data as { provider: string; model: string };
+    // Le fournisseur doit être proposable AUJOURD'HUI. Anthropic reste un
+    // provider valide en base (des agents peuvent exister), mais on refuse
+    // d'en créer ou d'en modifier tant qu'il n'est pas adossé à la clé
+    // personnelle de l'enseignant — sinon il consomme celle de
+    // l'établissement, sans rattachement ni plafond.
+    if (!isProviderSelectable(d.provider)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["provider"],
+        message: providerErrorFor(d.provider),
+      });
+      return; // inutile de juger le modèle d'un fournisseur refusé
+    }
+    if (!isModelAllowed(d.provider, d.model)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["model"],
+        message: modelErrorFor(d.provider),
+      });
+    }
+  });
 }
 
 const baseSchema = refineProviderModel(baseSchemaObject);

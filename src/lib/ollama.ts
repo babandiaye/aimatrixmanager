@@ -3,6 +3,7 @@
  * On lit l'URL et la clé depuis .env, jamais directement côté client.
  */
 import { logger } from "@/lib/logger";
+import { isModelAllowed, isInternalModel } from "@/lib/llm-catalog";
 
 const log = logger.child({ mod: "ollama" });
 
@@ -27,7 +28,21 @@ export function isOllamaConfigured(): boolean {
 }
 
 /**
- * Récupère la liste des modèles dispo sur le serveur Ollama.
+ * Récupère les modèles EXPOSABLES du serveur Ollama.
+ *
+ * Ne renvoie pas l'inventaire brut de fromager : la liste est filtrée par
+ * la politique du catalogue. Deux catégories disparaissent ici, à la
+ * source, pour qu'elles n'atteignent jamais le navigateur :
+ *
+ *   - les modèles hors politique (`claude-coder`, `qwen3.6`, `gemma4:31b`…),
+ *     qu'un utilisateur ne peut pas choisir et dont l'affichage ne ferait
+ *     que suggérer une option inexistante ;
+ *   - les modèles internes (`nomic-embed-text`), utilisés par l'indexation
+ *     RAG et dénués de sens comme modèle de conversation.
+ *
+ * `/status` est accessible à tout utilisateur connecté, pas seulement aux
+ * admins : le filtrage ici couvre donc aussi cette page.
+ *
  * Mise en cache courte (60s) côté Next pour éviter de spammer fromager.
  */
 export async function listOllamaModels(): Promise<OllamaModel[]> {
@@ -50,12 +65,16 @@ export async function listOllamaModels(): Promise<OllamaModel[]> {
         details?: { parameter_size?: string; family?: string };
       }>;
     };
-    return data.models.map((m) => ({
-      name: m.name,
-      size: m.size,
-      parameter_size: m.details?.parameter_size,
-      family: m.details?.family,
-    }));
+    return data.models
+      .filter(
+        (m) => !isInternalModel(m.name) && isModelAllowed("OLLAMA", m.name),
+      )
+      .map((m) => ({
+        name: m.name,
+        size: m.size,
+        parameter_size: m.details?.parameter_size,
+        family: m.details?.family,
+      }));
   } catch (e) {
     log.warn({ err: e }, "Ollama list failed");
     return [];
