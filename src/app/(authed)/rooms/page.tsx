@@ -202,7 +202,7 @@ export default async function RoomsPage({
                       ) : (
                         <span
                           className="inline-flex items-center gap-1 text-xs text-muted-foreground"
-                          title="Créé nativement (Element, formation1-chat.unchk.sn…)"
+                          title="Créé nativement (Element, jokko-jang.unchk.sn…)"
                         >
                           <ChatBubbleLeftRightIcon className="size-3.5" />
                           Chat
