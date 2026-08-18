@@ -29,11 +29,20 @@
   --color-status-processing: #9333ea;
   --color-status-error: #dc2626;
 
-  /* Statuts génériques. Étaient référencés par `text-status-ok` et
-     `text-status-warn` dans quatre composants sans jamais avoir été
-     définis — le texte s'affichait donc sans couleur. */
-  --color-status-ok: #16a34a;
-  --color-status-warn: #d97706;
+  /* Statuts génériques, dérivés des teintes du logo UN-CHK.
+     Le vert (#039F48) et l'orange (#E38420) du logo ne passent PAS le
+     seuil AA en texte sur blanc — 3,47:1 et 2,77:1. On conserve teinte et
+     saturation, on baisse la clarté jusqu'à 4,5:1. Les teintes d'origine
+     restent utilisables en aplat ou en filet (seuil UI de 3:1). */
+  --color-status-ok: #03893E;   /* logo #039F48 assombri — 4,51:1 sur blanc */
+  --color-status-warn: #AF6416; /* logo #E38420 assombri — 4,51:1 sur blanc */
+
+  /* Teintes de marque brutes, échantillonnées sur le logo.
+     Pour aplats, filets et pastilles — jamais pour du texte sur blanc. */
+  --color-brand-blue: #0870B7;
+  --color-brand-green: #039F48;
+  --color-brand-orange: #E38420;
+  --color-brand-deep: #224456;
 }
 
 /* ─── Tokens sémantiques (référencent :root pour le dark mode) ─────────── */
@@ -69,7 +78,7 @@
   /* Fond légèrement bleuté sur les pages authed pour dégager du blanc pur
      des cards — donne le look "dashboard" cohérent avec la charte visuelle
      AI Bot Manager (ex-#f8fafc slate). */
-  --background: #f5f8fe;
+  --background: #F3FAFE;
   --foreground: #0f172a;
   --card: #ffffff;
   --card-foreground: #0f172a;
@@ -80,20 +89,20 @@
   --border: #e2e8f0;
   --input: #e2e8f0;
 
-  --primary: #1d4ed8;             /* Bleu UNCHK — CTA / actifs */
+  --primary: #0870B7;             /* Bleu UNCHK — CTA / actifs */
   --primary-foreground: #ffffff;
-  --secondary: #eff6ff;
-  --secondary-foreground: #1d4ed8;
-  --accent: #eff6ff;
-  --accent-foreground: #1d4ed8;
+  --secondary: #E9F6FE;
+  --secondary-foreground: #0870B7;
+  --accent: #E9F6FE;
+  --accent-foreground: #0870B7;
 
   --destructive: #dc2626;
-  --ring: #1d4ed8;
+  --ring: #0870B7;
 
   --sidebar: #ffffff;
   --sidebar-foreground: #0f172a;
-  --sidebar-active: #eff6ff;
-  --sidebar-active-border: #1d4ed8;
+  --sidebar-active: #E9F6FE;
+  --sidebar-active-border: #0870B7;
   --sidebar-border: #e2e8f0;
 
   --radius: 0.5rem;
@@ -110,13 +119,24 @@
   --muted-foreground: #94a3b8;
   --border: #334155;
   --input: #334155;
-  --secondary: #1e3a8a;
-  --secondary-foreground: #dbeafe;
-  --accent: #1e3a8a;
-  --accent-foreground: #dbeafe;
+  --secondary: #0B3552;
+  --secondary-foreground: #BFE3FA;
+  --accent: #0B3552;
+  --accent-foreground: #BFE3FA;
+
+  /* Contrastes calculés sur la CARTE (#1e293b), plus claire que le fond
+     de page — c'est la surface la plus exigeante des deux.
+       bleu   du logo : 3,41:1 sur la carte -> éclairci
+       vert   du logo : 4,22:1 sur la carte -> éclairci
+       orange du logo : 5,29:1 sur la carte -> conservé tel quel */
+  --primary: #0B94F1;
+  --ring: #0B94F1;
+  --sidebar-active-border: #0B94F1;
+  --color-status-ok: #03A54A;
+  --color-status-warn: #E38420;
   --sidebar: #0f172a;
   --sidebar-foreground: #f8fafc;
-  --sidebar-active: #1e3a8a;
+  --sidebar-active: #0B3552;
   --sidebar-border: #334155;
 }
 
