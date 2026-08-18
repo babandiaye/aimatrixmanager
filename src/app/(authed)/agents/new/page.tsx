@@ -1,8 +1,10 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { can } from "@/lib/permissions";
-import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
+import { prisma } from "@/lib/prisma";
 import { getServerName } from "@/lib/synapse-admin";
+import { visibleLlmsFilter } from "@/lib/llm-access";
+import type { UserRole } from "@prisma/client";
 import {
   Card,
   CardContent,
@@ -12,14 +14,40 @@ import {
 } from "@/components/ui/card";
 import { AgentForm } from "../agent-form";
 
+
+/** Configurations LLM visibles par cet utilisateur, pour le sélecteur. */
+async function loadLlmChoices(role: UserRole, userId: string) {
+  const [choices, me] = await Promise.all([
+    prisma.llmConfig.findMany({
+      where: { ...visibleLlmsFilter({ role, userId }), isActive: true },
+      orderBy: [{ scope: "asc" }, { isDefault: "desc" }, { createdAt: "desc" }],
+      select: {
+        id: true,
+        name: true,
+        provider: true,
+        model: true,
+        scope: true,
+        isDefault: true,
+      },
+    }),
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { defaultLlmConfigId: true },
+    }),
+  ]);
+  return { choices, defaultLlmConfigId: me?.defaultLlmConfigId ?? null };
+}
+
 export default async function NewAgentPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
   if (!can(session.user.role, "agents.create")) redirect("/agents");
 
   const serverName = getServerName();
-  const ollamaEnabled = isOllamaConfigured();
-  const ollamaModels = ollamaEnabled ? await listOllamaModels() : [];
+  const { choices, defaultLlmConfigId } = await loadLlmChoices(
+    session.user.role,
+    session.user.id,
+  );
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -44,8 +72,8 @@ export default async function NewAgentPage() {
         <CardContent>
           <AgentForm
             serverName={serverName}
-            ollamaModels={ollamaModels}
-            ollamaEnabled={ollamaEnabled}
+            llmChoices={choices}
+            defaultLlmConfigId={defaultLlmConfigId}
           />
         </CardContent>
       </Card>

@@ -2,6 +2,12 @@
 Couche d'abstraction multi-provider :
   - ANTHROPIC : Claude via SDK officiel (prompt caching natif)
   - OLLAMA    : via /v1/chat/completions (format OpenAI compatible)
+  - OPENAI    : même endpoint, autre URL de base — aucun client dédié
+
+Les identifiants viennent de la configuration LLM rattachée à l'agent
+(`LlmConfig`), et seulement à défaut des variables d'environnement. C'est
+ce qui garantit qu'un agent pointant sur la clé personnelle d'un
+enseignant ne consomme pas celle de l'établissement.
 
 Deux modes :
   - call(...)         → renvoie (answer_text, usage_dict) en bloc
@@ -20,22 +26,80 @@ from typing import AsyncIterator, Optional, Tuple
 import anthropic
 import httpx
 
+from crypto_utils import decrypt
+
 import db
+
+
+
+# ── Identifiants par agent ───────────────────────────────────────────────────
+
+OPENAI_BASE_URL = "https://api.openai.com"
+
+_ENV_KEY = {
+    "ANTHROPIC": "ANTHROPIC_API_KEY",
+    "OLLAMA": "OLLAMA_API_KEY",
+    "OPENAI": "OPENAI_API_KEY",
+}
+
+
+def creds_for(agent: db.AgentRow) -> Tuple[str, str]:
+    """Renvoie (api_key, base_url) pour cet agent.
+
+    La clé de la configuration rattachée prime : c'est celle de son
+    propriétaire, donc sa facture. On ne retombe sur l'environnement que
+    si la config n'en porte pas — cas de l'Ollama mutualisé, dont la clé
+    est une donnée d'infrastructure, et cas des agents créés avant la
+    fonctionnalité, qui continuent ainsi de fonctionner sans migration.
+
+    Ne jamais journaliser la valeur renvoyée.
+    """
+    api_key = ""
+    if agent.llm_api_key_enc:
+        try:
+            api_key = decrypt(agent.llm_api_key_enc)
+        except Exception as e:
+            raise RuntimeError(
+                f"Clé LLM illisible pour l'agent {agent.slug} "
+                f"({type(e).__name__}) — la config a-t-elle été chiffrée "
+                f"avec une autre ENCRYPTION_KEY ?"
+            ) from None
+    if not api_key:
+        api_key = os.environ.get(_ENV_KEY.get(agent.provider, ""), "")
+
+    base_url = (agent.llm_api_url or "").rstrip("/")
+    if not base_url:
+        if agent.provider == "OLLAMA":
+            base_url = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
+        elif agent.provider == "OPENAI":
+            base_url = OPENAI_BASE_URL
+
+    if not api_key:
+        raise RuntimeError(f"Aucune clé API disponible pour {agent.provider}")
+    if agent.provider in ("OLLAMA", "OPENAI") and not base_url:
+        raise RuntimeError(f"Aucune URL de base pour {agent.provider}")
+    return api_key, base_url
 
 
 # ── Anthropic ────────────────────────────────────────────────────────────────
 
-_anthropic_client: Optional[anthropic.Anthropic] = None
+# Un client par clé — indexé par la clé elle-même, jamais journalisé.
+_anthropic_clients: dict[str, anthropic.Anthropic] = {}
 
 
-def _anthropic() -> anthropic.Anthropic:
-    global _anthropic_client
-    if _anthropic_client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY non défini")
-        _anthropic_client = anthropic.Anthropic(api_key=api_key)
-    return _anthropic_client
+def _anthropic(agent: db.AgentRow) -> anthropic.Anthropic:
+    """Client Anthropic pour CET agent.
+
+    Plus de singleton : deux enseignants peuvent apporter deux clés
+    différentes, et un client partagé les mélangerait. Le cache porte donc
+    sur la clé, pas sur le module.
+    """
+    api_key, _ = creds_for(agent)
+    client = _anthropic_clients.get(api_key)
+    if client is None:
+        client = anthropic.Anthropic(api_key=api_key)
+        _anthropic_clients[api_key] = client
+    return client
 
 
 def _call_anthropic_sync(
@@ -55,7 +119,7 @@ def _call_anthropic_sync(
     )
     if agent.temperature is not None:
         kwargs["temperature"] = agent.temperature
-    response = _anthropic().messages.create(**kwargs)
+    response = _anthropic(agent).messages.create(**kwargs)
     answer = response.content[0].text
     usage = response.usage
     return answer, {
@@ -68,13 +132,11 @@ def _call_anthropic_sync(
 
 # ── Ollama (via /v1/chat/completions, OpenAI compat) ─────────────────────────
 
-async def _call_ollama(
+async def _call_openai_compatible(
     agent: db.AgentRow, messages: list, max_history: int
 ) -> tuple[str, dict]:
-    base_url = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
-    api_key = os.environ.get("OLLAMA_API_KEY", "")
-    if not base_url or not api_key:
-        raise RuntimeError("OLLAMA_BASE_URL ou OLLAMA_API_KEY non défini")
+    # Identifiants de l'agent, pas de l'environnement : voir creds_for().
+    api_key, base_url = creds_for(agent)
 
     body: dict = {
         "model": agent.model,
@@ -162,16 +224,14 @@ async def _stream_anthropic(
     }
 
 
-async def _stream_ollama(
+async def _stream_openai_compatible(
     agent: db.AgentRow,
     messages: list,
     max_history: int,
     system_override: Optional[str] = None,
 ) -> AsyncIterator[Tuple[str, Optional[dict]]]:
-    base_url = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
-    api_key = os.environ.get("OLLAMA_API_KEY", "")
-    if not base_url or not api_key:
-        raise RuntimeError("OLLAMA_BASE_URL ou OLLAMA_API_KEY non défini")
+    # Identifiants de l'agent, pas de l'environnement : voir creds_for().
+    api_key, base_url = creds_for(agent)
 
     body: dict = {
         "model": agent.model,
@@ -240,8 +300,10 @@ async def call(
         return await loop.run_in_executor(
             None, _call_anthropic_sync, agent, messages, max_history
         )
-    elif agent.provider == "OLLAMA":
-        return await _call_ollama(agent, messages, max_history)
+    elif agent.provider in ("OLLAMA", "OPENAI"):
+        # Même protocole : /v1/chat/completions. Seules l'URL de base et la
+        # clé changent, et creds_for() s'en charge.
+        return await _call_openai_compatible(agent, messages, max_history)
     else:
         raise ValueError(f"Provider inconnu : {agent.provider}")
 
@@ -263,8 +325,8 @@ async def stream_call(
             agent, messages, max_history, system_override
         ):
             yield item
-    elif agent.provider == "OLLAMA":
-        async for item in _stream_ollama(
+    elif agent.provider in ("OLLAMA", "OPENAI"):
+        async for item in _stream_openai_compatible(
             agent, messages, max_history, system_override
         ):
             yield item

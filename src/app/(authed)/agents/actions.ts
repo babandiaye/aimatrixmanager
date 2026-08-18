@@ -7,12 +7,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { assertCan, can, canAny } from "@/lib/permissions";
-import {
-  isModelAllowed,
-  isProviderSelectable,
-  modelErrorFor,
-  providerErrorFor,
-} from "@/lib/llm-catalog";
+import { resolveEffectiveLlm } from "@/lib/llm-access";
 import { decrypt, encrypt } from "@/lib/crypto";
 import {
   buildMxid,
@@ -75,8 +70,7 @@ const baseSchemaObject = z.object({
     .optional()
     .transform((v) => v?.trim() || null),
   systemPrompt: z.string().min(10, "Au moins 10 caractères").max(40000),
-  provider: z.enum(["ANTHROPIC", "OLLAMA"]),
-  model: z.string().min(1, "Modèle requis").max(100),
+  llmConfigId: z.string().max(64),
   maxTokens: z.coerce.number().int().min(64).max(8192),
   temperature: z.coerce
     .number()
@@ -86,34 +80,11 @@ const baseSchemaObject = z.object({
     .or(z.literal("").transform(() => undefined)),
 });
 
-// Refine appliqué à part — couvre create et update (model valide pour le provider)
-function refineProviderModel<T extends z.ZodObject>(schema: T) {
-  return schema.superRefine((data: unknown, ctx) => {
-    const d = data as { provider: string; model: string };
-    // Le fournisseur doit être proposable AUJOURD'HUI. Anthropic reste un
-    // provider valide en base (des agents peuvent exister), mais on refuse
-    // d'en créer ou d'en modifier tant qu'il n'est pas adossé à la clé
-    // personnelle de l'enseignant — sinon il consomme celle de
-    // l'établissement, sans rattachement ni plafond.
-    if (!isProviderSelectable(d.provider)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["provider"],
-        message: providerErrorFor(d.provider),
-      });
-      return; // inutile de juger le modèle d'un fournisseur refusé
-    }
-    if (!isModelAllowed(d.provider, d.model)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["model"],
-        message: modelErrorFor(d.provider),
-      });
-    }
-  });
-}
-
-const baseSchema = refineProviderModel(baseSchemaObject);
+// La cohérence (fournisseur, modèle) n'a plus à être vérifiée ici : elle est
+// garantie à la création de la configuration LLM, où le modèle est choisi
+// dans la liste renvoyée par le fournisseur lui-même. Revalider contre notre
+// catalogue statique rejetterait à tort les modèles auxquels la clé
+// personnelle d'un enseignant donne accès.
 
 export type AgentFormState =
   | { error?: string; fieldErrors?: Record<string, string[]> }
@@ -126,8 +97,11 @@ function getFormData(formData: FormData) {
     name: String(formData.get("name") ?? "").trim(),
     description: String(formData.get("description") ?? ""),
     systemPrompt: String(formData.get("systemPrompt") ?? "").trim(),
-    provider: String(formData.get("provider") ?? "ANTHROPIC"),
-    model: String(formData.get("model") ?? "").trim(),
+    // Le formulaire ne choisit plus un couple (fournisseur, modèle) : il
+    // désigne une configuration LLM. Le serveur en dérive provider et model,
+    // ce qui rend impossible une combinaison incohérente envoyée à la main.
+    // Vide = « fournisseur par défaut », résolu côté serveur.
+    llmConfigId: String(formData.get("llmConfigId") ?? "").trim(),
     maxTokens: String(formData.get("maxTokens") ?? "2048"),
     temperature: t === "" ? undefined : t,
   };
@@ -141,10 +115,19 @@ export async function createAgent(
   if (!session?.user) throw new Error("Unauthorized");
   assertCan(session.user.role, "agents.create");
 
-  const parsed = baseSchema.safeParse(getFormData(formData));
+  const parsed = baseSchemaObject.safeParse(getFormData(formData));
   if (!parsed.success) {
     return { fieldErrors: parsed.error.flatten().fieldErrors };
   }
+
+  // Résolution du fournisseur : choix explicite, sinon défaut personnel,
+  // sinon défaut d'usine partagé. Une config invisible renvoie « introuvable ».
+  const llmRes = await resolveEffectiveLlm(
+    { role: session.user.role, userId: session.user.id },
+    parsed.data.llmConfigId || null,
+  );
+  if (!llmRes.ok) return { fieldErrors: { llmConfigId: [llmRes.error] } };
+  const llm = llmRes.llm;
 
   // Unicité slug + matrixUserId
   const mxid = buildMxid(parsed.data.slug);
@@ -202,8 +185,12 @@ export async function createAgent(
       matrixAccessToken: encrypt(accessToken),
       matrixDeviceId: deviceId,
       systemPrompt: parsed.data.systemPrompt,
-      provider: parsed.data.provider,
-      model: parsed.data.model,
+      llmConfigId: llm.id,
+      // provider et model sont recopiés depuis la configuration : le bot
+      // Python les lit encore directement. Ils resteront synchronisés tant
+      // qu'ils n'auront pas été retirés du modèle Agent.
+      provider: llm.provider,
+      model: llm.model,
       maxTokens: parsed.data.maxTokens,
       temperature: parsed.data.temperature ?? null,
       status: "DISABLED", // toujours désactivé par défaut, l'admin active après
@@ -248,7 +235,7 @@ export async function updateAgent(
 
   // À l'édition, le slug n'est pas modifiable (le MXID Matrix est figé)
   // → on omit() sur l'objet pur (sans refine) puis on réapplique le refine
-  const updateSchema = refineProviderModel(baseSchemaObject.omit({ slug: true }));
+  const updateSchema = baseSchemaObject.omit({ slug: true });
   const parsed = updateSchema.safeParse({
     ...getFormData(formData),
     slug: undefined,
@@ -263,14 +250,22 @@ export async function updateAgent(
     select: { slug: true, name: true },
   });
 
+  const llmRes = await resolveEffectiveLlm(
+    { role: session.user.role, userId: session.user.id },
+    parsed.data.llmConfigId || null,
+  );
+  if (!llmRes.ok) return { fieldErrors: { llmConfigId: [llmRes.error] } };
+  const llm = llmRes.llm;
+
   await prisma.agent.update({
     where: { id },
     data: {
       name: parsed.data.name,
       description: parsed.data.description,
       systemPrompt: parsed.data.systemPrompt,
-      provider: parsed.data.provider,
-      model: parsed.data.model,
+      llmConfigId: llm.id,
+      provider: llm.provider,
+      model: llm.model,
       maxTokens: parsed.data.maxTokens,
       temperature: parsed.data.temperature ?? null,
     },

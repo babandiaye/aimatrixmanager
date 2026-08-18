@@ -2,8 +2,9 @@ import { notFound, redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { canAny } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { isOllamaConfigured, listOllamaModels } from "@/lib/ollama";
 import { getServerName } from "@/lib/synapse-admin";
+import { visibleLlmsFilter } from "@/lib/llm-access";
+import type { UserRole } from "@prisma/client";
 import {
   Card,
   CardContent,
@@ -12,6 +13,30 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { AgentForm } from "../../agent-form";
+
+
+/** Configurations LLM visibles par cet utilisateur, pour le sélecteur. */
+async function loadLlmChoices(role: UserRole, userId: string) {
+  const [choices, me] = await Promise.all([
+    prisma.llmConfig.findMany({
+      where: { ...visibleLlmsFilter({ role, userId }), isActive: true },
+      orderBy: [{ scope: "asc" }, { isDefault: "desc" }, { createdAt: "desc" }],
+      select: {
+        id: true,
+        name: true,
+        provider: true,
+        model: true,
+        scope: true,
+        isDefault: true,
+      },
+    }),
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { defaultLlmConfigId: true },
+    }),
+  ]);
+  return { choices, defaultLlmConfigId: me?.defaultLlmConfigId ?? null };
+}
 
 export default async function EditAgentPage({
   params,
@@ -40,8 +65,10 @@ export default async function EditAgentPage({
   }
 
   const serverName = getServerName();
-  const ollamaEnabled = isOllamaConfigured();
-  const ollamaModels = ollamaEnabled ? await listOllamaModels() : [];
+  const { choices, defaultLlmConfigId } = await loadLlmChoices(
+    session.user.role,
+    session.user.id,
+  );
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -65,8 +92,8 @@ export default async function EditAgentPage({
         <CardContent>
           <AgentForm
             serverName={serverName}
-            ollamaModels={ollamaModels}
-            ollamaEnabled={ollamaEnabled}
+            llmChoices={choices}
+            defaultLlmConfigId={defaultLlmConfigId}
             initial={{
               id: agent.id,
               slug: agent.slug,
@@ -75,6 +102,7 @@ export default async function EditAgentPage({
               systemPrompt: agent.systemPrompt,
               provider: agent.provider,
               model: agent.model,
+              llmConfigId: agent.llmConfigId,
               maxTokens: agent.maxTokens,
               temperature: agent.temperature,
             }}

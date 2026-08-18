@@ -1209,10 +1209,19 @@ async def main():
     if not os.getenv("WS_TOKEN_ENCRYPTION_KEY"):
         log.error("WS_TOKEN_ENCRYPTION_KEY non défini")
         sys.exit(1)
-    # Au moins un provider doit être configuré
-    if not os.getenv("ANTHROPIC_API_KEY") and not os.getenv("OLLAMA_API_KEY"):
-        log.error("Aucun provider LLM configuré (ANTHROPIC_API_KEY ou OLLAMA_API_KEY)")
-        sys.exit(1)
+    # L'environnement n'est plus la seule source de clés : elles vivent
+    # désormais dans LlmConfig, rattachées à un agent. Refuser de démarrer
+    # faute de variable priverait de service des agents parfaitement
+    # configurés en base. On avertit, on ne bloque pas.
+    #
+    # OLLAMA_API_KEY reste attendue : la config partagée de l'établissement
+    # n'embarque pas de clé, c'est une donnée d'infrastructure.
+    if not os.getenv("OLLAMA_API_KEY"):
+        log.warning(
+            "OLLAMA_API_KEY absente — les agents sur le fournisseur partagé "
+            "de l'établissement échoueront. Les agents à clé personnelle "
+            "restent fonctionnels."
+        )
 
     Path(STORE_ROOT).mkdir(parents=True, exist_ok=True)
     _acquire_store_lock()

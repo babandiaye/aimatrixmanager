@@ -25,6 +25,13 @@ class AgentRow:
     max_tokens: int
     temperature: Optional[float]
     status: str
+    # Configuration LLM rattachée. Renseignée quand l'agent pointe sur une
+    # config (partagée ou personnelle) ; `None` pour les agents créés avant
+    # la fonctionnalité, qui retombent alors sur les variables
+    # d'environnement — c'est ce qui les garde vivants sans migration.
+    llm_config_id: Optional[str] = None
+    llm_api_url: Optional[str] = None
+    llm_api_key_enc: Optional[str] = None
 
 
 _pool: Optional[asyncpg.Pool] = None
@@ -48,12 +55,20 @@ async def list_enabled_agents() -> list[AgentRow]:
     pool = await get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, slug, name, "matrixUserId", "matrixDeviceId",
-               "matrixAccessToken", "systemPrompt", provider, model, "maxTokens",
-               temperature, status
-        FROM "Agent"
-        WHERE status = 'ENABLED'
-        ORDER BY slug
+        SELECT a.id, a.slug, a.name, a."matrixUserId", a."matrixDeviceId",
+               a."matrixAccessToken", a."systemPrompt", a.provider, a.model,
+               a."maxTokens", a.temperature, a.status,
+               a."llmConfigId",
+               c."apiUrl"    AS llm_api_url,
+               c."apiKeyEnc" AS llm_api_key_enc
+        FROM "Agent" a
+        -- LEFT JOIN : un agent sans config rattachée reste servi, il retombe
+        -- sur les variables d'environnement. La clause isActive garantit
+        -- qu'une config désactivée cesse d'être utilisée sans redémarrage.
+        LEFT JOIN "LlmConfig" c
+               ON c.id = a."llmConfigId" AND c."isActive" = true
+        WHERE a.status = 'ENABLED'
+        ORDER BY a.slug
         """
     )
     return [
@@ -70,6 +85,9 @@ async def list_enabled_agents() -> list[AgentRow]:
             max_tokens=r["maxTokens"],
             temperature=r["temperature"],
             status=r["status"],
+            llm_config_id=r["llmConfigId"],
+            llm_api_url=r["llm_api_url"],
+            llm_api_key_enc=r["llm_api_key_enc"],
         )
         for r in rows
     ]

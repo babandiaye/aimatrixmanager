@@ -1,13 +1,34 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import Link from "next/link";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { type AgentFormState, createAgent, updateAgent } from "./actions";
-import { SHARED_OLLAMA_MODEL } from "@/lib/llm-catalog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { LLMProvider } from "@prisma/client";
+
+export type LlmChoice = {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  scope: string;
+  isDefault: boolean;
+};
+
+const PROVIDER_LABEL: Record<string, string> = {
+  ANTHROPIC: "Anthropic Claude",
+  OPENAI: "OpenAI ChatGPT",
+  OLLAMA: "Ollama UN-CHK",
+};
 
 type Initial = {
   id?: string;
@@ -19,6 +40,7 @@ type Initial = {
   // (OPENAI) au fil des phases, et le formulaire reçoit ce que la base
   // contient — y compris pour des agents créés avant la restriction.
   provider?: LLMProvider;
+  llmConfigId?: string | null;
   model?: string;
   maxTokens?: number;
   temperature?: number | null;
@@ -27,13 +49,13 @@ type Initial = {
 export function AgentForm({
   initial,
   serverName,
-  ollamaModels,
-  ollamaEnabled,
+  llmChoices,
+  defaultLlmConfigId,
 }: {
   initial?: Initial;
   serverName: string;
-  ollamaModels: { name: string; size: number; parameter_size?: string }[];
-  ollamaEnabled: boolean;
+  llmChoices: LlmChoice[];
+  defaultLlmConfigId: string | null;
 }) {
   const isEdit = Boolean(initial?.id);
   const action = isEdit
@@ -46,12 +68,18 @@ export function AgentForm({
   >(action, undefined);
   const errs = state?.fieldErrors ?? {};
 
-  // Le fournisseur et le modèle ne sont plus choisis : il n'y en a qu'un.
-  // On vérifie seulement que le serveur l'expose réellement — le catalogue
-  // dit ce qui est AUTORISÉ, cette liste dit ce qui EXISTE.
-  const modelAvailable = ollamaModels.some(
-    (m) => m.name === SHARED_OLLAMA_MODEL,
+  // Configuration retenue : celle de l'agent s'il en a une, sinon le défaut
+  // personnel, sinon le défaut d'usine partagé. Le serveur refait la même
+  // résolution — l'affichage ne fait que la refléter.
+  const fallbackId =
+    defaultLlmConfigId ??
+    llmChoices.find((c) => c.scope === "SHARED" && c.isDefault)?.id ??
+    llmChoices[0]?.id ??
+    "";
+  const [llmConfigId, setLlmConfigId] = useState(
+    initial?.llmConfigId ?? fallbackId,
   );
+  const chosen = llmChoices.find((c) => c.id === llmConfigId) ?? null;
 
   return (
     <form action={formAction} className="space-y-5">
@@ -139,32 +167,47 @@ export function AgentForm({
         )}
       </div>
 
-      {/* Fournisseur — un seul disponible.
-          Anthropic et OpenAI reviendront adossés à la clé personnelle de
-          l'enseignant. Les proposer aujourd'hui ferait consommer la clé
-          de l'établissement, sans rattachement ni plafond. */}
+      {/* Fournisseur : on désigne une configuration, pas un couple
+          (fournisseur, modèle). Le serveur en dérive le reste, ce qui rend
+          une combinaison incohérente impossible à envoyer à la main. */}
       <div className="space-y-2">
-        <Label>Fournisseur LLM</Label>
-        <div className="rounded-lg border border-border p-3">
-          <div className="text-sm font-medium">
-            Ollama UN-CHK —{" "}
-            <span className="font-mono">{SHARED_OLLAMA_MODEL}</span>
-          </div>
-          <div className="text-xs text-muted-foreground">
-            {!ollamaEnabled
-              ? "Non configuré — OLLAMA_BASE_URL et OLLAMA_API_KEY absentes du .env."
-              : modelAvailable
-                ? "Hébergé à l'UN-CHK. Aucune donnée ne quitte l'établissement, aucun coût par jeton."
-                : `Le serveur répond mais n'expose pas ${SHARED_OLLAMA_MODEL} — l'agent ne pourra pas répondre.`}
-          </div>
-        </div>
-        <input type="hidden" name="provider" value="OLLAMA" />
-        <input type="hidden" name="model" value={SHARED_OLLAMA_MODEL} />
-        {errs.provider?.[0] && (
-          <p className="text-xs text-destructive">{errs.provider[0]}</p>
-        )}
-        {errs.model?.[0] && (
-          <p className="text-xs text-destructive">{errs.model[0]}</p>
+        <Label htmlFor="llmConfigId">Fournisseur LLM</Label>
+        <Select
+          name="llmConfigId"
+          value={llmConfigId}
+          onValueChange={(v) => v && setLlmConfigId(v)}
+        >
+          <SelectTrigger id="llmConfigId" className="w-full">
+            <SelectValue placeholder="Choisir un fournisseur…" />
+          </SelectTrigger>
+          <SelectContent>
+            {llmChoices.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                {c.name} — {c.model}
+                {c.scope === "SHARED" ? " (établissement)" : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          {chosen?.scope === "PERSONAL" ? (
+            <>
+              <strong>{PROVIDER_LABEL[chosen.provider] ?? chosen.provider}</strong>{" "}
+              avec votre clé personnelle — chaque message de vos étudiants vous
+              sera facturé par le fournisseur.
+            </>
+          ) : (
+            <>
+              Hébergé à l&apos;UN-CHK. Aucune donnée ne quitte
+              l&apos;établissement, aucun coût par jeton.{" "}
+              <Link href="/llm" className="underline">
+                Déclarer ma propre clé
+              </Link>
+            </>
+          )}
+        </p>
+        {errs.llmConfigId?.[0] && (
+          <p className="text-xs text-destructive">{errs.llmConfigId[0]}</p>
         )}
       </div>
 
